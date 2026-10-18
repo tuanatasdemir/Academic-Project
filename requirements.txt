@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+python-docx
+thefuzz
+python-Levenshtein
+httpx
+python-multipart
+python-Levenshtein
+pytest
