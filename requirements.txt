@@ -7,3 +7,5 @@ httpx
 python-multipart
 python-Levenshtein
 pytest
+uvicorn
+rapidfuzz
