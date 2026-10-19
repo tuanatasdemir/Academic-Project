@@ -1,52 +1,124 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse
 import io
 import asyncio
 import time
+import os
 import docx
 
-from app.parsers.citation_regex import (
-    extract_all_paragraphs,
-    extract_citations,
-    extract_apa_citations,
-    parse_document_sections,
-    verify_in_text_mentions,
-)
-from app.services.crossref_service import verify_reference_with_crossref
+try:
+    from app.parsers.citation_regex import (
+        extract_all_paragraphs,
+        extract_citations,
+        extract_apa_citations,
+        parse_document_sections,
+        verify_in_text_mentions,
+    )
+    from app.services.crossref_service import verify_reference_with_crossref
+except ImportError:
+    from citation_regex import (
+        extract_all_paragraphs,
+        extract_citations,
+        extract_apa_citations,
+        parse_document_sections,
+        verify_in_text_mentions,
+    )
+    from crossref_service import verify_reference_with_crossref
 
 app = FastAPI(
     title="Akademik Kaynakça Doğrulama ve Metin İçi Atıf Tutarlılığı Sistemi",
-    version="1.0.0",
+    version="2.0.0",
     description=(
         "Hem numaralı ([1]) hem APA (Yazar, Yıl) atıfları yakalayan, "
-        "DOI'siz hakemli dergi yayınlarını Crossref, OpenAlex, DataCite ve Semantic Scholar "
+        "DOI'siz hakemli dergi yayınlarını 7 Küresel Akademik Veri Tabanı "
+        "(Crossref, OpenAlex, DBLP Computer Science, Europe PMC, arXiv, DataCite, Semantic Scholar) "
         "üzerinden Başlık + Yazar + Yıl ile doğrulayan ve metin içi doğru bahsedilmeyi denetleyen API."
     )
 )
 
+# ---------------------------------------------------------------------------
+# CORS VE ÖZEL AĞ ERİŞİMİ (Private Network Access) YAPILANDIRMASI
+# ---------------------------------------------------------------------------
+# allow_credentials=False olmalıdır; çünkü allow_origins=["*"] ile allow_credentials=True
+# aynı anda kullanıldığında tarayıcılar (Chrome/Edge/Firefox) CORS hatası ("Failed to fetch") verir.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
+@app.middleware("http")
+async def add_private_network_headers(request, call_next):
+    """
+    Chrome ve Edge'in yerel ağ (localhost / 127.0.0.1) güvenlik politikası olan
+    Private Network Access (PNA) preflight kontrollerini sorunsuz geçmesini sağlar.
+    """
+    response = await call_next(request)
+    response.headers["Access-Control-Allow-Private-Network"] = "true"
+    return response
+
+
+# ---------------------------------------------------------------------------
+# STATİK SAYFA VE DURUM ENDPOINTLERİ
+# ---------------------------------------------------------------------------
+
 @app.get("/")
 def root():
+    """
+    Kullanıcı tarayıcıda http://127.0.0.1:8000 açtığında doğrudan index.html arayüzünü sunar.
+    Böylece dosya protokolü (file://) kaynaklı tüm CORS engelleri tamamen ortadan kalkar.
+    """
+    candidates = [
+        "index.html",
+        os.path.join(os.path.dirname(__file__), "index.html"),
+        os.path.join(os.path.dirname(__file__), "..", "index.html"),
+        "templates/index.html",
+        "static/index.html"
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return FileResponse(path, media_type="text/html")
+
     return {
         "status": "Sistem aktif",
-        "version": "1.0.0",
-        "features": [
-            "IEEE ([1]) ve APA (Yazar, Yıl) Hibrit Atıf Ayrıştırma",
-            "Tablo Hücreleri ve Paragraf Okuma",
-            "Crossref + OpenAlex + DataCite + Semantic Scholar Çoklu API Doğrulaması",
-            "DOI Olmayan Hakemli Yayınlar İçin Başlık, Yazar ve Yıldan Doğrulama",
-            "Metin İçi Yazar/Yıl Çapraz Kontrolü ve Bağlam Analizi"
+        "version": "2.0.0",
+        "message": "index.html dosyasını proje dizinine koyduğunuzda bu adreste doğrudan web arayüzü açılacaktır.",
+        "supported_databases": [
+            "Crossref (DOI ve Bibliyografik)",
+            "OpenAlex (Açık Bilim ve Hakemli Makaleler)",
+            "DBLP (Bilgisayar Mühendisliği ve IEEE/ACM Bildirileri)",
+            "Europe PMC (Açık Erişim ve Çok Disiplinli Fen/Mühendislik)",
+            "arXiv (Yapay Zekâ ve Bilgisayar Bilimi Önbasımları)",
+            "DataCite (Veri Kümeleri ve Araştırma Çıktıları)",
+            "Semantic Scholar (AI Destekli Akademik Literatür Grafı)"
         ]
     }
 
+
+@app.get("/status")
+def status_endpoint():
+    return {
+        "status": "Sistem aktif",
+        "version": "2.0.0",
+        "supported_databases": [
+            "Crossref",
+            "OpenAlex",
+            "DBLP",
+            "Europe PMC",
+            "arXiv",
+            "DataCite",
+            "Semantic Scholar"
+        ]
+    }
+
+
+# ---------------------------------------------------------------------------
+# ANA ANALİZ ENDPOINTİ
+# ---------------------------------------------------------------------------
 
 @app.post("/analyze")
 async def analyze_document(
@@ -89,7 +161,7 @@ async def analyze_document(
             if r_id and sent:
                 contexts_by_ref.setdefault(r_id, []).append(sent)
 
-        # 4. Asenkron (Eşzamanlı) Çoklu API Doğrulaması (DOI + Başlık + Yazar + Yıl)
+        # 4. Asenkron (Eşzamanlı) Çoklu API Doğrulaması (7 Akademik Veri Tabanı)
         tasks = [
             verify_reference_with_crossref(
                 ref_info=info,
@@ -138,7 +210,16 @@ async def analyze_document(
                 "total_blocks_read": len(paragraphs),
                 "total_references_found": len(bib_entries),
                 "similarity_threshold_used": f"%{similarity_threshold}",
-                "verification_breakdown": status_counts
+                "verification_breakdown": status_counts,
+                "academic_databases_queried": [
+                    "Crossref",
+                    "OpenAlex",
+                    "DBLP",
+                    "Europe PMC",
+                    "arXiv",
+                    "DataCite",
+                    "Semantic Scholar"
+                ]
             },
             "citation_consistency": {
                 "numbered_citations_in_body": sorted(list(cited_numbers)),
