@@ -23,9 +23,15 @@
         <h1 class="text-lg sm:text-xl font-bold text-slate-900">Akademik Kaynakça ve Atıf Doğrulama</h1>
         <p class="text-xs sm:text-sm text-slate-500">Metin içi atıf tutarlılığı ile DOI, başlık ve yazar doğrulama aracı</p>
       </div>
-      <span class="text-xs font-medium px-2.5 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
-        .docx Denetleyici
-      </span>
+      <div class="flex items-center gap-2">
+        <span id="backendBadge" class="hidden sm:inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
+          <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+          FastAPI Backend Bağlantılı
+        </span>
+        <span class="text-xs font-medium px-2.5 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+          .docx Denetleyici
+        </span>
+      </div>
     </div>
   </header>
 
@@ -40,7 +46,7 @@
 
     <!-- 1. Dosya Yükleme Kartı -->
     <section class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
-      <label id="dropZone" for="docxFileInput" class="cursor-pointer border-2 border-dashed border-slate-300 hover:border-blue-500 rounded-xl p-8 transition flex flex-col items-center justify-center text-center bg-slate-50/50 hover:bg-blue-50/20">
+      <div id="dropZone" role="button" tabindex="0" class="cursor-pointer border-2 border-dashed border-slate-300 hover:border-blue-500 rounded-xl p-8 transition flex flex-col items-center justify-center text-center bg-slate-50/50 hover:bg-blue-50/20">
         <div class="w-12 h-12 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-xl mb-3">
           📄
         </div>
@@ -51,9 +57,13 @@
           Belgenizdeki metin içi atıflar ile kaynakça listesi karşılaştırılır; DOI, başlık ve yazar bilgileri doğrulanır.
         </p>
         <input id="docxFileInput" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" class="sr-only" />
-      </label>
+      </div>
 
-      <div class="mt-4 flex flex-wrap items-center justify-between gap-4 pt-4 border-t border-slate-100">
+      <div class="mt-4 flex items-center justify-between pt-4 border-t border-slate-100 flex-wrap gap-2">
+        <div class="text-xs text-slate-500 flex items-center gap-1.5">
+          <span class="w-2 h-2 rounded-full bg-blue-600"></span>
+          <span>Backend adresi: <strong class="text-slate-700">http://127.0.0.1:8000/analyze</strong></span>
+        </div>
         <button id="btnAnalyzeFile" type="button" disabled class="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed text-white font-semibold text-sm px-6 py-2.5 rounded-xl transition">
           Belgeyi Denetle
         </button>
@@ -140,6 +150,7 @@
 
   <script>
     const appState = {
+      backendUrl: 'http://127.0.0.1:8000/analyze',
       similarityThreshold: 80,
       activeFilter: 'ALL',
       selectedFile: null,
@@ -379,9 +390,7 @@
           } else if (resp.status === 404) {
             brokenDoiDetected = true;
           }
-        } catch (err) {
-          // İsim ve yazardan aramaya geç
-        }
+        } catch (err) {}
       }
 
       if (!candidate) {
@@ -407,9 +416,7 @@
               }
             }
           }
-        } catch (err) {
-          // Crossref bibliyografik yedek aramaya geç
-        }
+        } catch (err) {}
       }
 
       if (!candidate) {
@@ -435,9 +442,7 @@
               }
             }
           }
-        } catch (err) {
-          // Eşleşme yok
-        }
+        } catch (err) {}
       }
 
       if (!candidate) {
@@ -577,7 +582,76 @@
       return paragraphs;
     }
 
-    async function analyzeParagraphs(paragraphs) {
+    async function analyzeWithBackend(file) {
+      const progressSection = document.getElementById('progressSection');
+      const progressFill = document.getElementById('progressBarFill');
+      const progressPercent = document.getElementById('progressPercentText');
+      const progressStep = document.getElementById('progressStepText');
+
+      progressSection.classList.remove('hidden');
+      progressFill.style.width = '30%';
+      progressPercent.textContent = '30%';
+      progressStep.textContent = 'Belge Python FastAPI backend sunucusuna iletiliyor...';
+
+      const formData = new FormData();
+      formData.append('file', file);
+
+      let stepCount = 35;
+      const interval = setInterval(() => {
+        if (stepCount < 85) {
+          stepCount += 8;
+          progressFill.style.width = `${stepCount}%`;
+          progressPercent.textContent = `${stepCount}%`;
+          progressStep.textContent = 'Crossref, OpenAlex, DataCite ve Semantic Scholar üzerinden taranıyor...';
+        }
+      }, 1000);
+
+      try {
+        const response = await fetch(appState.backendUrl, {
+          method: 'POST',
+          body: formData
+        });
+
+        clearInterval(interval);
+
+        if (!response.ok) {
+          let errDetail = `HTTP ${response.status} hatası`;
+          try {
+            const errJson = await response.json();
+            errDetail = errJson.detail || errDetail;
+          } catch (e) {}
+          throw new Error(errDetail);
+        }
+
+        const data = await response.json();
+
+        progressFill.style.width = '100%';
+        progressPercent.textContent = '100%';
+        progressStep.textContent = 'Doğrulama ve analiz tamamlandı!';
+        setTimeout(() => progressSection.classList.add('hidden'), 400);
+
+        const cc = data.citation_consistency || {};
+        appState.lastAnalysisResult = {
+          missingNumbered: cc.missing_numbered_in_bibliography || [],
+          unmatchedApaCitations: (cc.missing_apa_in_bibliography || []).map(x => typeof x === 'string' ? x : (x.raw_match || x.first_author || JSON.stringify(x))),
+          unusedInText: cc.unused_in_text || [],
+          duplicateRefs: (cc.duplicate_entries_in_bibliography || []).map(x => typeof x === 'string' ? x : (x.message || JSON.stringify(x))),
+          mentionMismatches: (cc.in_text_mention_mismatches || []).map(x => ({
+            message: x.message || 'Atıf uyuşmazlığı',
+            sentence: x.sentence || ''
+          })),
+          verifiedReferences: data.bibliographic_verification || []
+        };
+
+        renderResults();
+        return true;
+      } catch (err) {
+        clearInterval(interval);
+        throw err;
+      }
+    }
+
+    async function analyzeParagraphsLocally(paragraphs) {
       const progressSection = document.getElementById('progressSection');
       const progressFill = document.getElementById('progressBarFill');
       const progressPercent = document.getElementById('progressPercentText');
@@ -763,7 +837,8 @@
         VERIFIED: { bg: "bg-emerald-50 text-emerald-700 border-emerald-200", label: "✓ Doğrulandı (DOI)" },
         VERIFIED_BY_TITLE_AUTHOR: { bg: "bg-teal-50 text-teal-700 border-teal-200", label: "✓ İsim & Yazardan Doğrulandı" },
         WEB_OR_DOCUMENTATION_SOURCE: { bg: "bg-blue-50 text-blue-700 border-blue-200", label: "Web / Dokümantasyon" },
-        METADATA_MISMATCH: { bg: "bg-amber-50 text-amber-800 border-amber-200", label: "⚠ Yazar / Yıl / Başlık Uyuşmazlığı" },
+        METADATA_MISMATCH: { bg: "bg-amber-50 text-amber-800 border-amber-200", label: "⚠ Yazar / Yıl Uyuşmazlığı" },
+        TITLE_MISMATCH_WARNING: { bg: "bg-amber-50 text-amber-800 border-amber-200", label: "⚠ Başlık / Yazar Uyarısı" },
         INVALID_DOI_BUT_PAPER_EXISTS: { bg: "bg-orange-50 text-orange-800 border-orange-200", label: "⚠ DOI Hatalı Ama Eser Bulundu" },
         FAKE_OR_NOT_FOUND: { bg: "bg-rose-50 text-rose-700 border-rose-200", label: "✕ Bulunamadı / Geçersiz DOI" },
         UNVERIFIED_NO_MATCH: { bg: "bg-slate-100 text-slate-700 border-slate-200", label: "? Eşleşme Bulunamadı" }
@@ -780,7 +855,7 @@
 
       const refs = res.verifiedReferences || [];
       const verifiedCount = refs.filter(r => ['VERIFIED', 'VERIFIED_BY_TITLE_AUTHOR', 'WEB_OR_DOCUMENTATION_SOURCE'].includes(r.verification.status)).length;
-      const mismatchCount = refs.filter(r => ['METADATA_MISMATCH', 'INVALID_DOI_BUT_PAPER_EXISTS'].includes(r.verification.status)).length + res.mentionMismatches.length;
+      const mismatchCount = refs.filter(r => ['METADATA_MISMATCH', 'TITLE_MISMATCH_WARNING', 'INVALID_DOI_BUT_PAPER_EXISTS'].includes(r.verification.status)).length + res.mentionMismatches.length;
       const fakeCount = refs.filter(r => ['FAKE_OR_NOT_FOUND', 'UNVERIFIED_NO_MATCH'].includes(r.verification.status)).length;
 
       document.getElementById('statTotalRefs').textContent = refs.length;
@@ -796,7 +871,7 @@
         mismatchContainer.innerHTML = res.mentionMismatches.map(m => `
           <div class="p-3.5 rounded-xl bg-amber-50/70 border border-amber-200 text-xs space-y-1">
             <p class="font-semibold text-amber-900">⚠ ${m.message}</p>
-            <p class="text-slate-600"><strong>Cümle:</strong> "${m.sentence}"</p>
+            ${m.sentence ? `<p class="text-slate-600"><strong>Cümle:</strong> "${m.sentence}"</p>` : ''}
           </div>
         `).join('');
       }
@@ -843,7 +918,11 @@
       }
 
       container.innerHTML = filtered.map(item => {
-        const v = item.verification;
+        const v = item.verification || {};
+        const titleSimText = (v.title_similarity_percent !== undefined && v.title_similarity_percent !== null)
+          ? `%${v.title_similarity_percent}`
+          : '-';
+
         return `
           <div class="rounded-xl border border-slate-200 p-4 space-y-2 bg-white">
             <div class="flex items-center justify-between gap-2 flex-wrap">
@@ -851,29 +930,31 @@
                 <span class="px-2 py-0.5 rounded bg-slate-900 text-white font-bold text-xs">[${item.ref_number}]</span>
                 ${getStatusBadgeHtml(v.status)}
               </div>
-              <span class="text-xs text-slate-500">Metin içi geçiş: <strong>${item.in_text_mention_count} kez</strong></span>
+              <span class="text-xs text-slate-500">Metin içi geçiş: <strong>${item.in_text_mention_count || 0} kez</strong></span>
             </div>
 
-            <p class="text-xs sm:text-sm text-slate-800 bg-slate-50 p-3 rounded-lg border border-slate-100">
+            <p class="text-xs sm:text-sm text-slate-800 bg-slate-50 p-3 rounded-lg border border-slate-100 font-medium">
               ${item.raw_citation}
             </p>
 
+            ${v.real_title ? `<p class="text-xs text-slate-600"><strong>Bulunan Eser:</strong> ${v.real_title} ${v.source_database ? `<span class="text-slate-400">(${v.source_database})</span>` : ''}</p>` : ''}
+
             <p class="text-xs font-medium text-slate-700">
-              ${v.message}
+              ${v.message || ''}
             </p>
 
             <div class="grid grid-cols-3 gap-2 pt-1 text-xs">
               <div class="p-2 rounded bg-slate-50">
                 <span class="text-slate-400 block text-[11px]">Başlık Benzerliği</span>
-                <strong>%${v.title_similarity_percent}</strong>
+                <strong>${titleSimText}</strong>
               </div>
               <div class="p-2 rounded bg-slate-50">
                 <span class="text-slate-400 block text-[11px]">Yazar Kontrolü</span>
-                <strong>${v.author_check}</strong>
+                <strong>${v.author_check || '-'}</strong>
               </div>
               <div class="p-2 rounded bg-slate-50">
                 <span class="text-slate-400 block text-[11px]">Yıl Kontrolü</span>
-                <strong>${v.year_check}</strong>
+                <strong>${v.year_check || '-'}</strong>
               </div>
             </div>
           </div>
@@ -886,13 +967,6 @@
       const dropZone = document.getElementById('dropZone');
       const btnAnalyzeFile = document.getElementById('btnAnalyzeFile');
       const fileNameDisplay = document.getElementById('fileNameDisplay');
-      const slider = document.getElementById('thresholdSlider');
-      const sliderLabel = document.getElementById('thresholdValueLabel');
-
-      slider.addEventListener('input', () => {
-        appState.similarityThreshold = parseInt(slider.value, 10);
-        sliderLabel.textContent = `%${appState.similarityThreshold}`;
-      });
 
       function handleFileSelected(file) {
         if (!file || !file.name.toLowerCase().endsWith('.docx')) {
@@ -903,6 +977,13 @@
         fileNameDisplay.textContent = `Seçilen Dosya: ${file.name}`;
         btnAnalyzeFile.disabled = false;
       }
+
+      dropZone.addEventListener('click', e => {
+        if (e.target !== fileInput) {
+          fileInput.value = '';
+          fileInput.click();
+        }
+      });
 
       fileInput.addEventListener('change', e => {
         if (e.target.files && e.target.files[0]) handleFileSelected(e.target.files[0]);
@@ -925,12 +1006,22 @@
         if (!appState.selectedFile) return;
         btnAnalyzeFile.disabled = true;
         btnAnalyzeFile.textContent = 'Denetleniyor...';
+
         try {
-          const paragraphs = await extractParagraphsFromDocxBlob(appState.selectedFile);
-          await analyzeParagraphs(paragraphs);
-          showToast('Belge denetimi tamamlandı.');
-        } catch (err) {
-          showToast(`Hata: ${err.message}`);
+          // 1. Öncelik: Python FastAPI backend (http://127.0.0.1:8000/analyze)
+          await analyzeWithBackend(appState.selectedFile);
+          showToast('Belge Python backend üzerinden başarıyla denetlendi.');
+        } catch (backendErr) {
+          console.warn('Backend bağlantısı kurulamadı, tarayıcı içi motora geçiliyor:', backendErr);
+          showToast(`Backend uyarısı: ${backendErr.message}. Tarayıcı içi denetim başlatılıyor...`);
+          try {
+            // 2. Yedek: Tarayıcı içi JS motoru
+            const paragraphs = await extractParagraphsFromDocxBlob(appState.selectedFile);
+            await analyzeParagraphsLocally(paragraphs);
+            showToast('Belge tarayıcı içi motor ile denetlendi.');
+          } catch (localErr) {
+            showToast(`Hata: ${localErr.message}`);
+          }
         } finally {
           btnAnalyzeFile.disabled = false;
           btnAnalyzeFile.textContent = 'Belgeyi Denetle';
