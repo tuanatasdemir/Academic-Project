@@ -1,6 +1,7 @@
 import asyncio
 import re
 import unicodedata
+import xml.etree.ElementTree as ET
 from difflib import SequenceMatcher
 from typing import Any
 import httpx
@@ -76,15 +77,15 @@ def compute_title_similarity(title_a: str, title_b: str) -> int:
 # ---------------------------------------------------------------------------
 
 METADATA_CACHE: dict[str, dict[str, Any]] = {}
-RATE_LIMIT_SEMAPHORE = asyncio.Semaphore(4)
+RATE_LIMIT_SEMAPHORE = asyncio.Semaphore(6)
 
 DEFAULT_HEADERS = {
-    "User-Agent": "AcademicCitationVerifier/1.0 (mailto:tuana@nku.edu.tr; Tekirdag Namik Kemal University)"
+    "User-Agent": "AcademicCitationVerifier/2.0 (mailto:tuana@nku.edu.tr; Tekirdag Namik Kemal University - Computer Engineering)"
 }
 
 
 # ---------------------------------------------------------------------------
-# 3. HARİCİ AKADEMİK VERİ TABANI İSTEMCİLERİ (Crossref + DataCite + OpenAlex + Semantic Scholar)
+# 3. HARİCİ AKADEMİK VERİ TABANI MODEL DÖNÜŞTÜRÜCÜLERİ
 # ---------------------------------------------------------------------------
 
 def _standardize_crossref_item(item: dict[str, Any]) -> dict[str, Any]:
@@ -125,7 +126,7 @@ def _standardize_crossref_item(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def _reconstruct_openalex_abstract(inverted_index: dict[str, list[int]] | None) -> str:
-    """OpenAlex'in ters indeks (inverted index) formatındaki özetini düz metne çevirir."""
+    """OpenAlex'in ters indeks formatındaki özetini düz metne çevirir."""
     if not inverted_index or not isinstance(inverted_index, dict):
         return ""
     word_positions: list[tuple[int, str]] = []
@@ -230,29 +231,192 @@ def _standardize_semanticscholar_item(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _standardize_dblp_item(item: dict[str, Any]) -> dict[str, Any]:
+    """
+    DBLP Computer Science Bibliography REST API yanıtını standart doğrulama şemasına dönüştürür.
+    Özellikle Bilgisayar Mühendisliği konferans bildirileri (IEEE, ACM, Springer) ve makalelerinde liderdir.
+    """
+    info = item.get("info") or {}
+    raw_title = info.get("title") or ""
+    clean_title = raw_title.rstrip(".")
+
+    authors_raw = info.get("authors") or {}
+    authors_list: list[str] = []
+    if isinstance(authors_raw, dict):
+        auth_entry = authors_raw.get("author")
+        if isinstance(auth_entry, list):
+            for a in auth_entry:
+                if isinstance(a, dict):
+                    name = a.get("text") or a.get("@text") or ""
+                else:
+                    name = str(a)
+                if name:
+                    authors_list.append(name.strip().split()[-1])
+        elif isinstance(auth_entry, dict):
+            name = auth_entry.get("text") or auth_entry.get("@text") or ""
+            if name:
+                authors_list.append(name.strip().split()[-1])
+        elif isinstance(auth_entry, str) and auth_entry:
+            authors_list.append(auth_entry.strip().split()[-1])
+
+    year_str = info.get("year")
+    year = int(year_str) if (year_str and str(year_str).isdigit()) else None
+
+    return {
+        "source_api": "DBLP (Computer Science)",
+        "title": clean_title,
+        "authors": authors_list,
+        "year": year,
+        "pages": info.get("pages"),
+        "doi": info.get("doi"),
+        "journal": info.get("venue") or "",
+        "abstract": "",
+        "url": info.get("ee") or info.get("url")
+    }
+
+
+def _standardize_europepmc_item(item: dict[str, Any]) -> dict[str, Any]:
+    """
+    Europe PMC REST API yanıtını standart doğrulama şemasına dönüştürür.
+    Açık erişimli fen, mühendislik ve biyomedikal literatüründe dünya lideridir.
+    """
+    raw_title = item.get("title") or ""
+    clean_title = re.sub(r'<[^>]+>', ' ', raw_title).strip().rstrip(".")
+
+    author_str = item.get("authorString") or ""
+    authors_list: list[str] = []
+    if author_str:
+        for a in author_str.split(","):
+            a_clean = a.strip()
+            if a_clean:
+                surname = a_clean.split()[0].rstrip(".")
+                if surname:
+                    authors_list.append(surname)
+
+    year_raw = item.get("pubYear")
+    year = int(year_raw) if (year_raw and str(year_raw).isdigit()) else None
+
+    return {
+        "source_api": "Europe PMC",
+        "title": clean_title,
+        "authors": authors_list,
+        "year": year,
+        "pages": item.get("pageInfo"),
+        "doi": item.get("doi"),
+        "journal": item.get("journalTitle") or "",
+        "abstract": item.get("abstractText") or "",
+        "url": f"https://europepmc.org/article/{item.get('source', 'MED')}/{item.get('id', '')}" if item.get("id") else None
+    }
+
+
+def _parse_arxiv_atom(xml_text: str) -> list[dict[str, Any]]:
+    """
+    arXiv Atom XML API yanıtını ayrıştırır.
+    Yapay zekâ, bilgisayar bilimleri ve matematik alanındaki en güncel önbasımları doğrular.
+    """
+    items: list[dict[str, Any]] = []
+    if not xml_text or "<entry>" not in xml_text:
+        return items
+
+    try:
+        clean_xml = re.sub(r'<\s*(\/)?\s*[a-zA-Z0-9_]+:([a-zA-Z0-9_]+)', r'<\1\2', xml_text)
+        clean_xml = re.sub(r'\s+xmlns(:\w+)?="[^"]+"', '', clean_xml)
+        root = ET.fromstring(clean_xml)
+
+        for entry in root.findall(".//entry"):
+            title_el = entry.find("title")
+            title = title_el.text.strip().replace("\n", " ") if (title_el is not None and title_el.text) else ""
+
+            authors: list[str] = []
+            for a_el in entry.findall(".//author"):
+                name_el = a_el.find("name")
+                if name_el is not None and name_el.text:
+                    surname = name_el.text.strip().split()[-1]
+                    authors.append(surname)
+
+            pub_el = entry.find("published")
+            year = None
+            if pub_el is not None and pub_el.text and len(pub_el.text) >= 4:
+                year_str = pub_el.text[:4]
+                if year_str.isdigit():
+                    year = int(year_str)
+
+            doi_el = entry.find("doi")
+            doi = doi_el.text.strip() if (doi_el is not None and doi_el.text) else None
+
+            id_el = entry.find("id")
+            url = id_el.text.strip() if (id_el is not None and id_el.text) else ""
+
+            summary_el = entry.find("summary")
+            abstract = summary_el.text.strip().replace("\n", " ") if (summary_el is not None and summary_el.text) else ""
+
+            if title:
+                items.append({
+                    "source_api": "arXiv (Preprint)",
+                    "title": title,
+                    "authors": authors,
+                    "year": year,
+                    "pages": None,
+                    "doi": doi,
+                    "journal": "arXiv Computer Science / AI",
+                    "abstract": abstract,
+                    "url": url
+                })
+    except Exception:
+        pass
+    return items
+
+
+# ---------------------------------------------------------------------------
+# 4. GÜVENLİ HTTP İSTEMCİSİ (Retry + Exponential Backoff)
+# ---------------------------------------------------------------------------
+
 async def _get_json_with_retry(client: httpx.AsyncClient, url: str, params: dict[str, Any] | None = None) -> tuple[int, dict[str, Any]]:
-    """HTTP 429 veya geçici ağ hatalarına karşı Exponential Backoff ile güvenli GET isteği yapar."""
+    """HTTP 429 veya geçici ağ hatalarına karşı Exponential Backoff ile güvenli JSON isteği yapar."""
     for attempt in range(3):
         try:
             resp = await client.get(url, params=params, headers=DEFAULT_HEADERS)
             if resp.status_code == 200:
                 return 200, resp.json()
             if resp.status_code == 429:
-                await asyncio.sleep(1.2 * (attempt + 1))
+                await asyncio.sleep(1.0 * (attempt + 1))
                 continue
             return resp.status_code, {}
         except httpx.RequestError:
             if attempt < 2:
-                await asyncio.sleep(0.8 * (attempt + 1))
+                await asyncio.sleep(0.6 * (attempt + 1))
                 continue
             return 503, {}
     return 429, {}
 
 
+async def _get_text_with_retry(client: httpx.AsyncClient, url: str, params: dict[str, Any] | None = None) -> tuple[int, str]:
+    """XML/Düz metin formatında yanıt veren API'ler için güvenli GET isteği yapar."""
+    for attempt in range(3):
+        try:
+            resp = await client.get(url, params=params, headers=DEFAULT_HEADERS)
+            if resp.status_code == 200:
+                return 200, resp.text
+            if resp.status_code == 429:
+                await asyncio.sleep(1.0 * (attempt + 1))
+                continue
+            return resp.status_code, ""
+        except httpx.RequestError:
+            if attempt < 2:
+                await asyncio.sleep(0.6 * (attempt + 1))
+                continue
+            return 503, ""
+    return 429, ""
+
+
+# ---------------------------------------------------------------------------
+# 5. KATMAN 1: ÇOK KAYNAKLI DOI DOĞRULAMA (Crossref + DataCite + OpenAlex + Europe PMC)
+# ---------------------------------------------------------------------------
+
 async def fetch_by_doi_multi_source(doi: str) -> tuple[int, dict[str, Any]]:
     """
-    Katman 1: Verilen DOI'yi sırasıyla Crossref, DataCite ve OpenAlex üzerinde arar.
-    Böylece DataCite veya yerel DOI kullanan hakemli yayınlar yanlışlıkla 'Sahte DOI' sayılmaz.
+    Verilen DOI'yi sırasıyla Crossref, DataCite, OpenAlex ve Europe PMC üzerinde arar.
+    Böylece DataCite veya tıp/biyoloji/mühendislik dizinli yayınlar yanlışlıkla 'Sahte DOI' sayılmaz.
     """
     cache_key = f"doi:{doi.lower()}"
     if cache_key in METADATA_CACHE:
@@ -260,31 +424,131 @@ async def fetch_by_doi_multi_source(doi: str) -> tuple[int, dict[str, Any]]:
 
     async with RATE_LIMIT_SEMAPHORE:
         async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
+            # 1. Crossref
             status, data = await _get_json_with_retry(client, f"https://api.crossref.org/works/{doi}")
             if status == 200 and data.get("message"):
                 std = _standardize_crossref_item(data["message"])
                 METADATA_CACHE[cache_key] = std
                 return 200, std
 
+            # 2. DataCite
             dc_status, dc_data = await _get_json_with_retry(client, f"https://api.datacite.org/dois/{doi}")
             if dc_status == 200 and dc_data.get("data"):
                 std = _standardize_datacite_item(dc_data["data"])
                 METADATA_CACHE[cache_key] = std
                 return 200, std
 
+            # 3. OpenAlex
             oa_status, oa_data = await _get_json_with_retry(client, f"https://api.openalex.org/works/https://doi.org/{doi}")
             if oa_status == 200 and oa_data.get("id"):
                 std = _standardize_openalex_item(oa_data)
                 METADATA_CACHE[cache_key] = std
                 return 200, std
 
+            # 4. Europe PMC
+            epmc_status, epmc_data = await _get_json_with_retry(
+                client,
+                "https://europepmc.org/webservices/rest/search",
+                params={"query": f"DOI:\"{doi}\"", "format": "json", "pageSize": 1}
+            )
+            if epmc_status == 200:
+                results = (epmc_data.get("resultList") or {}).get("result") or []
+                if results:
+                    std = _standardize_europepmc_item(results[0])
+                    METADATA_CACHE[cache_key] = std
+                    return 200, std
+
             return (404 if status == 404 else status), {}
+
+
+# ---------------------------------------------------------------------------
+# 6. KATMAN 2: DEVASA VERİ HAVUZUNDA BAŞLIK + YAZAR + YIL ARAMASI (7 API)
+# ---------------------------------------------------------------------------
+
+async def _search_crossref(client: httpx.AsyncClient, clean_title: str, first_author: str | None) -> list[dict[str, Any]]:
+    params: dict[str, Any] = {"query.bibliographic": clean_title, "rows": 3}
+    if first_author:
+        params["query.author"] = first_author
+    st, data = await _get_json_with_retry(client, "https://api.crossref.org/works", params=params)
+    res = []
+    if st == 200:
+        items = (data.get("message") or {}).get("items") or []
+        for it in items:
+            res.append(_standardize_crossref_item(it))
+    return res
+
+
+async def _search_openalex(client: httpx.AsyncClient, clean_title: str) -> list[dict[str, Any]]:
+    st, data = await _get_json_with_retry(client, "https://api.openalex.org/works", params={"search": clean_title, "per-page": 3})
+    res = []
+    if st == 200:
+        for it in data.get("results") or []:
+            res.append(_standardize_openalex_item(it))
+    return res
+
+
+async def _search_dblp(client: httpx.AsyncClient, clean_title: str) -> list[dict[str, Any]]:
+    """DBLP Bilgisayar Bilimleri bibliyografyası araması."""
+    st, data = await _get_json_with_retry(
+        client,
+        "https://dblp.org/search/publ/api",
+        params={"q": clean_title, "format": "json", "h": 3}
+    )
+    res = []
+    if st == 200:
+        hits = ((data.get("result") or {}).get("hits") or {}).get("hit") or []
+        for it in hits:
+            res.append(_standardize_dblp_item(it))
+    return res
+
+
+async def _search_europepmc(client: httpx.AsyncClient, clean_title: str) -> list[dict[str, Any]]:
+    """Europe PMC açık erişim makale dizini araması."""
+    st, data = await _get_json_with_retry(
+        client,
+        "https://europepmc.org/webservices/rest/search",
+        params={"query": f"TITLE:\"{clean_title}\"", "format": "json", "pageSize": 3}
+    )
+    res = []
+    if st == 200:
+        results = (data.get("resultList") or {}).get("result") or []
+        for it in results:
+            res.append(_standardize_europepmc_item(it))
+    return res
+
+
+async def _search_arxiv(client: httpx.AsyncClient, clean_title: str) -> list[dict[str, Any]]:
+    """arXiv önbasım (preprint) veri tabanı araması."""
+    st, xml_text = await _get_text_with_retry(
+        client,
+        "http://export.arxiv.org/api/query",
+        params={"search_query": f"all:{clean_title}", "max_results": 3}
+    )
+    if st == 200 and xml_text:
+        return _parse_arxiv_atom(xml_text)
+    return []
+
+
+async def _search_semantic_scholar(client: httpx.AsyncClient, clean_title: str, first_author: str | None) -> list[dict[str, Any]]:
+    """Semantic Scholar AI akademik motoru araması."""
+    s2_query = f"{clean_title} {first_author or ''}".strip()
+    st, data = await _get_json_with_retry(
+        client,
+        "https://api.semanticscholar.org/graph/v1/paper/search",
+        params={"query": s2_query, "limit": 3, "fields": "title,authors,year,externalIds,venue,abstract,url"}
+    )
+    res = []
+    if st == 200:
+        for it in data.get("data") or []:
+            res.append(_standardize_semanticscholar_item(it))
+    return res
 
 
 async def search_by_title_and_author(title: str, first_author: str | None = None, year: int | None = None) -> list[dict[str, Any]]:
     """
-    Katman 2: DOI'si olmayan hakemli dergi makalelerini, bildirileri ve kitapları
-    Başlık + Yazar + Yıl bilgileriyle Crossref, OpenAlex ve Semantic Scholar üzerinden arar.
+    Katman 2: DOI'si olmayan tüm hakemli makaleleri, konferans bildirilerini ve kitapları
+    7 Farklı Küresel Akademik Veri Tabanı (Crossref, OpenAlex, DBLP, Europe PMC, Semantic Scholar, arXiv, DataCite)
+    üzerinde eşzamanlı (asenkron paralel) olarak arar.
     """
     clean_title = title.strip()
     if len(clean_title) < 6:
@@ -297,52 +561,45 @@ async def search_by_title_and_author(title: str, first_author: str | None = None
     candidates: list[dict[str, Any]] = []
 
     async with RATE_LIMIT_SEMAPHORE:
-        async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
-            cr_params: dict[str, Any] = {"query.bibliographic": clean_title, "rows": 4}
-            if first_author:
-                cr_params["query.author"] = first_author
-            cr_status, cr_data = await _get_json_with_retry(client, "https://api.crossref.org/works", params=cr_params)
-            if cr_status == 200:
-                items = (cr_data.get("message") or {}).get("items") or []
-                for item in items:
-                    candidates.append(_standardize_crossref_item(item))
+        async with httpx.AsyncClient(timeout=9.0, follow_redirects=True) as client:
+            # 1. Aşama: 4 Ana Veri Tabanını Paralel Sorgula (Crossref, OpenAlex, DBLP, Europe PMC)
+            core_tasks = [
+                _search_crossref(client, clean_title, first_author),
+                _search_openalex(client, clean_title),
+                _search_dblp(client, clean_title),
+                _search_europepmc(client, clean_title),
+            ]
+            core_results = await asyncio.gather(*core_tasks, return_exceptions=True)
+            for r in core_results:
+                if isinstance(r, list):
+                    candidates.extend(r)
 
-            oa_params: dict[str, Any] = {"search": clean_title, "per-page": 4}
-            oa_status, oa_data = await _get_json_with_retry(client, "https://api.openalex.org/works", params=oa_params)
-            if oa_status == 200:
-                for item in oa_data.get("results") or []:
-                    candidates.append(_standardize_openalex_item(item))
+            best_sim_so_far = max(
+                (compute_title_similarity(clean_title, c.get("title", "")) for c in candidates),
+                default=0
+            )
 
-            best_so_far = max((compute_title_similarity(clean_title, c.get("title", "")) for c in candidates), default=0)
-            if best_so_far < 75:
-                s2_query = f"{clean_title} {first_author or ''}".strip()
-                s2_params = {
-                    "query": s2_query,
-                    "limit": 3,
-                    "fields": "title,authors,year,externalIds,venue,abstract,url"
-                }
-                s2_status, s2_data = await _get_json_with_retry(
-                    client,
-                    "https://api.semanticscholar.org/graph/v1/paper/search",
-                    params=s2_params
-                )
-                if s2_status == 200:
-                    for item in s2_data.get("data") or []:
-                        candidates.append(_standardize_semanticscholar_item(item))
+            # 2. Aşama: Eğer güçlü bir eşleşme (%75+) bulunamadıysa Semantic Scholar ve arXiv'i devreye sok
+            if best_sim_so_far < 75:
+                deep_tasks = [
+                    _search_semantic_scholar(client, clean_title, first_author),
+                    _search_arxiv(client, clean_title),
+                ]
+                deep_results = await asyncio.gather(*deep_tasks, return_exceptions=True)
+                for r in deep_results:
+                    if isinstance(r, list):
+                        candidates.extend(r)
 
     METADATA_CACHE[cache_key] = {"candidates": candidates}
     return candidates
 
 
 # ---------------------------------------------------------------------------
-# 4. ÇOK BOYUTLU DOĞRULAMA MOTORU (Başlık + Yazar + Yıl + Sayfa + Metin İçi Bağlam)
+# 7. ÇOK BOYUTLU DOĞRULAMA VE UYUM ANALİZİ
 # ---------------------------------------------------------------------------
 
 def evaluate_author_match(claimed_authors: list[str], real_authors: list[str], raw_text: str) -> tuple[str, int]:
-    """
-    Kaynakçadaki yazar soyadlarını API'den dönen gerçek yazar soyadlarıyla karşılaştırır.
-    Dönüş: (durum_etiketi, yazar_uyum_skoru_0_100)
-    """
+    """Kaynakçadaki yazarları API'den dönen gerçek yazarlarla karşılaştırır."""
     if not real_authors:
         return "API_YAZAR_VERİSİ_YOK", 80
 
@@ -376,10 +633,7 @@ def evaluate_author_match(claimed_authors: list[str], real_authors: list[str], r
 
 
 def evaluate_year_match(claimed_year: int | None, real_year: int | None) -> tuple[str, int]:
-    """
-    Kaynakçadaki yayın yılını API'den dönen gerçek yayın yılıyla karşılaştırır.
-    Akademik dergilerde Online First (Erken Görünüm) ile Cilt/Sayı basımı arasındaki ±1 yıl farkını tolere eder.
-    """
+    """Kaynakçadaki yılı gerçek yayın yılıyla karşılaştırır (±1 yıl Online First toleransı)."""
     if not claimed_year or not real_year:
         return "BELİRTİLMEMİŞ", 80
     diff = abs(claimed_year - real_year)
@@ -390,15 +644,8 @@ def evaluate_year_match(claimed_year: int | None, real_year: int | None) -> tupl
     return f"HATALI (Gerçek: {real_year}, Yazılan: {claimed_year})", 0
 
 
-def evaluate_context_relevance(
-    context_sentences: list[str],
-    real_title: str,
-    abstract: str
-) -> dict[str, Any]:
-    """
-    Metin içinde bu kaynağa atıf yapılan cümlelerin (context_sentences)
-    makalenin başlığı ve özetiyle (abstract) kavramsal uyumunu denetler.
-    """
+def evaluate_context_relevance(context_sentences: list[str], real_title: str, abstract: str) -> dict[str, Any]:
+    """Metin içindeki atıf cümlelerinin makale özeti ve başlığıyla kavramsal uyumunu ölçer."""
     if not context_sentences:
         return {
             "status": "METİNDE_ATIF_YOK",
@@ -438,10 +685,6 @@ def _build_verification_response(
     verification_method: str,
     context_sentences: list[str] | None = None
 ) -> dict[str, Any]:
-    """
-    Seçilen en iyi API adayı ile kaynakçadaki bilgileri (Başlık, Yazar, Yıl, Sayfa, Bağlam)
-    karşılaştırarak detaylı doğrulama raporu üretir.
-    """
     extracted_title = ref_info.get("extracted_title") or ref_info.get("raw_text", "")
     raw_text = ref_info.get("raw_text", "")
     claimed_authors = ref_info.get("authors") or []
@@ -531,17 +774,21 @@ def _build_verification_response(
     }
 
 
+# ---------------------------------------------------------------------------
+# 8. ANA DOĞRULAMA ÇAĞRISI (verify_reference_with_crossref)
+# ---------------------------------------------------------------------------
+
 async def verify_reference_with_crossref(
     ref_info: dict[str, Any],
     similarity_threshold: int = 80,
     context_sentences: list[str] | None = None
 ) -> dict[str, Any]:
     """
-    Ana Doğrulama Fonksiyonu (main.py ile tam uyumlu):
-    1. Kaynakta DOI varsa: Crossref -> DataCite -> OpenAlex sırasıyla DOI'yi doğrular.
-    2. Kaynakta DOI yoksa: Crossref + OpenAlex + Semantic Scholar üzerinde Başlık + Yazar + Yıl
-       araması yaparak DOI'siz hakemli dergi makalelerini, bildirileri ve kitapları doğrular.
-    3. Yazılım dokümantasyonu / resmi web kaynağıysa (URL içeriyorsa) bunu ayrıca sınıflandırır.
+    Kapsamlı Doğrulama Motoru (7 Akademik Veri Tabanı):
+    1. DOI varsa: Crossref -> DataCite -> OpenAlex -> Europe PMC sırasıyla aranır.
+    2. DOI yoksa: Crossref, OpenAlex, DBLP (Bilgisayar Mühendisliği), Europe PMC,
+       Semantic Scholar ve arXiv üzerinde eşzamanlı taranır.
+    3. Yazılım/web dokümantasyonuysa (URL içeriyorsa) ayrı sınıflandırılır.
     """
     doi = ref_info.get("doi")
     extracted_title = ref_info.get("extracted_title") or ref_info.get("raw_text", "")
@@ -594,12 +841,12 @@ async def verify_reference_with_crossref(
                 "verification_method": "DIRECT_DOI_FAILED",
                 "confidence_score": 0,
                 "message": (
-                    f"KRİTİK HATA: Yazılan DOI ({doi}) Crossref, DataCite ve OpenAlex'te bulunamadı; "
+                    f"KRİTİK HATA: Yazılan DOI ({doi}) Crossref, DataCite, OpenAlex ve Europe PMC'de bulunamadı; "
                     f"başlık ve yazardan yapılan aramada da böyle bir hakemli makaleye rastlanmadı (Muhtemel yapay zeka halüsinasyonu / sahte kaynak)!"
                 )
             }
 
-        # DURUM B: KAYNAKTA DOI YOK -> BAŞLIK VE YAZARDAN ARAMA (Çoklu API)
+        # DURUM B: KAYNAKTA DOI YOK -> BAŞLIK VE YAZARDAN 7 VERİ TABANINDA ARAMA
         candidates = await search_by_title_and_author(extracted_title, first_author, claimed_year)
 
         best_candidate = None
@@ -617,7 +864,7 @@ async def verify_reference_with_crossref(
             )
             _, y_score = evaluate_year_match(claimed_year, cand.get("year"))
             combined = (t_sim * 0.60) + (a_score * 0.25) + (y_score * 0.15)
-            if combined > best_combined_score and t_sim >= 65:
+            if combined > best_combined_score and t_sim >= 60:
                 best_combined_score = combined
                 best_candidate = cand
 
@@ -647,13 +894,13 @@ async def verify_reference_with_crossref(
 
         return {
             "status": "UNVERIFIED_NO_MATCH",
-            "verification_method": "TITLE_AND_AUTHOR_SEARCH_FAILED",
+            "verification_method": "MULTI_DATABASE_SEARCH_FAILED",
             "confidence_score": 0,
             "extracted_title_searched": extracted_title,
             "searched_author": first_author,
             "message": (
-                "Kaynakta DOI yok. Başlık ve yazar bilgisiyle Crossref, OpenAlex ve Semantic Scholar "
-                "üzerinde yapılan aramada eşleşen bir yayın bulunamadı. Manuel kontrol önerilir."
+                "Kaynakta DOI yok. 7 küresel akademik veri tabanında (Crossref, OpenAlex, DBLP, Europe PMC, "
+                "Semantic Scholar, arXiv, DataCite) yapılan başlık ve yazar taramasında eşleşen bir hakemli yayın bulunamadı."
             )
         }
 

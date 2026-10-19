@@ -23,15 +23,9 @@
         <h1 class="text-lg sm:text-xl font-bold text-slate-900">Akademik Kaynakça ve Atıf Doğrulama</h1>
         <p class="text-xs sm:text-sm text-slate-500">Metin içi atıf tutarlılığı ile DOI, başlık ve yazar doğrulama aracı</p>
       </div>
-      <div class="flex items-center gap-2">
-        <span id="backendBadge" class="hidden sm:inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
-          <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-          FastAPI Backend Bağlantılı
-        </span>
-        <span class="text-xs font-medium px-2.5 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
-          .docx Denetleyici
-        </span>
-      </div>
+      <span class="text-xs font-medium px-2.5 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+        .docx Denetleyici
+      </span>
     </div>
   </header>
 
@@ -61,8 +55,8 @@
 
       <div class="mt-4 flex items-center justify-between pt-4 border-t border-slate-100 flex-wrap gap-2">
         <div class="text-xs text-slate-500 flex items-center gap-1.5">
-          <span class="w-2 h-2 rounded-full bg-blue-600"></span>
-          <span>Backend adresi: <strong class="text-slate-700">http://127.0.0.1:8000/analyze</strong></span>
+          <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+          <span>FastAPI Backend: <strong class="text-slate-700">http://127.0.0.1:8000/analyze</strong></span>
         </div>
         <button id="btnAnalyzeFile" type="button" disabled class="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed text-white font-semibold text-sm px-6 py-2.5 rounded-xl transition">
           Belgeyi Denetle
@@ -168,418 +162,23 @@
       toastTimer = setTimeout(() => banner.classList.add('hidden'), 4000);
     }
 
-    function normalizeText(str) {
-      if (!str) return '';
-      const map = { 'ı': 'i', 'ğ': 'g', 'ü': 'u', 'ş': 's', 'ö': 'o', 'ç': 'c', 'İ': 'i', 'I': 'i', 'â': 'a', 'é': 'e', 'í': 'i' };
-      let s = str.replace(/<[^>]+>/g, ' ').trim().toLowerCase();
-      s = s.replace(/[ığüşöçİIâéí]/g, ch => map[ch] || ch);
-      s = s.normalize('NFKD').replace(/[\u0300-\u036f]/g, '');
-      return s.replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
-    }
-
-    function levenshteinSimilarity(a, b) {
-      const s1 = normalizeText(a);
-      const s2 = normalizeText(b);
-      if (!s1 || !s2) return 0;
-      if (s1 === s2) return 100;
-
-      const shorter = s1.length <= s2.length ? s1 : s2;
-      const longer = s1.length <= s2.length ? s2 : s1;
-      if (shorter.length >= 24 && longer.includes(shorter)) return 96;
-
-      const m = s1.length;
-      const n = s2.length;
-      const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
-      for (let i = 0; i <= m; i++) dp[i][0] = i;
-      for (let j = 0; j <= n; j++) dp[0][j] = j;
-
-      for (let i = 1; i <= m; i++) {
-        for (let j = 1; j <= n; j++) {
-          const cost = s1[i - 1] === s2[j - 1] ? 0 : 1;
-          dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
-        }
-      }
-      const maxLen = Math.max(m, n);
-      return Math.round(((maxLen - dp[m][n]) / maxLen) * 100);
-    }
-
-    function isBibliographyHeader(line) {
-      const cleaned = (line || '').trim();
-      if (!cleaned || cleaned.length > 45) return false;
-      if (/(\.{2,}|\t+)\s*\d+\s*$/.test(cleaned)) return false;
-      if (/^\d+\..*\s+\d+\s*$/.test(cleaned)) return false;
-      return /^(?:(?:bölüm|section|chapter)?\s*(?:\d+|[IVXLCDM]+)[\.\-\s:]+)?(kaynakça|kaynaklar|references|bibliography|works\s+cited|literatür)\s*:?\s*$/i.test(cleaned);
-    }
-
-    function extractAuthorsFromSegment(seg) {
-      let s = (seg || '').trim();
-      if (!/\b[A-ZÇĞİÖŞÜ]\.$/.test(s)) {
-        s = s.replace(/\.+$/, '').trim();
-      }
-      if (!s) return [];
-      const clean = s.replace(/\s+(?:&|and|ve|ile)\s+/gi, ', ');
-
-      const apaMatches = [...clean.matchAll(/([A-ZÇĞİÖŞÜÂÎÛ][a-zçğıöşüâîûA-ZÇĞİÖŞÜ\-\']+),\s*(?:[A-ZÇĞİÖŞÜ]\.\s*)+/g)];
-      if (apaMatches.length > 0) return apaMatches.map(m => m[1]);
-
-      const ieeeMatches = [...clean.matchAll(/(?:[A-ZÇĞİÖŞÜ]\.\s*)+([A-ZÇĞİÖŞÜÂÎÛ][a-zçğıöşüâîûA-ZÇĞİÖŞÜ\-\']+)/g)];
-      if (ieeeMatches.length > 0) return ieeeMatches.map(m => m[1]);
-
-      const firstChunk = s.split('.')[0].split(',')[0].trim();
-      return firstChunk && firstChunk.length <= 60 ? [firstChunk] : [];
-    }
-
-    function parseBibliographyLine(line, autoIdx) {
-      const cleaned = (line || '').trim();
-      if (cleaned.length < 12) return null;
-
-      let refId = autoIdx;
-      let content = cleaned;
-      const numMatch = cleaned.match(/^(?:\[(\d+)\]|(\d+)[\.\)\-])\s+(.*)$/);
-      if (numMatch) {
-        refId = parseInt(numMatch[1] || numMatch[2], 10);
-        content = numMatch[3].trim();
-      }
-
-      const doiMatch = content.match(/(?:https?:\/\/(?:dx\.)?doi\.org\/|doi\s*:\s*)?(10\.\d{4,9}\/[-._;()/:A-Za-z0-9]+)/i);
-      const doi = doiMatch ? doiMatch[1].replace(/[.,;\)\]]+$/, '') : null;
-
-      const urlMatch = content.match(/(https?:\/\/[^\s<>"]+)/i);
-      const url = urlMatch ? urlMatch[1].replace(/[.,;\)\]]+$/, '') : null;
-
-      const contentNoUrl = content
-        .replace(/(https?:\/\/[^\s<>"]+)/gi, '')
-        .replace(/(?:https?:\/\/(?:dx\.)?doi\.org\/|doi\s*:\s*)?(10\.\d{4,9}\/[-._;()/:A-Za-z0-9]+)/gi, '');
-
-      let claimedPages = null;
-      const pageMatches = [...contentNoUrl.matchAll(/(?:pp?\.|s\.|ss\.|pages|sayfa)?\s*(\d{1,5}\s*[-–—]\s*\d{1,5})/gi)];
-      for (const pm of pageMatches) {
-        const cand = pm[1].replace(/\s+/g, '').replace(/[–—]/g, '-');
-        const parts = cand.split('-');
-        const p1 = parseInt(parts[0], 10);
-        const p2 = parseInt(parts[1], 10);
-        if (!(p1 >= 1900 && p1 <= 2035 && p2 >= 1900 && p2 <= 2035 && (p2 - p1) <= 30) && p2 >= p1) {
-          claimedPages = `${p1}-${p2}`;
-          break;
-        }
-      }
-
-      let year = null;
-      let authors = [];
-      let extractedTitle = cleaned;
-
-      const ypMatch = contentNoUrl.match(/\(\s*((?:19|20)\d{2}[a-z]?)\s*(?:,[^\)]*)?\)/);
-      if (ypMatch) {
-        year = parseInt(ypMatch[1].slice(0, 4), 10);
-        const authorSeg = contentNoUrl.slice(0, ypMatch.index).trim();
-        let afterYear = contentNoUrl.slice(ypMatch.index + ypMatch[0].length).trim().replace(/^\.+/, '').trim();
-        authors = extractAuthorsFromSegment(authorSeg);
-        afterYear = afterYear.split(/\s*(?:Erişim adresi|Retrieved from|Available at|http|doi:)\s*:?/i)[0].trim();
-        const tm = afterYear.match(/^((?:[^\.\(]|\([^\)]*\)|\.(?=[a-zA-Z0-9_]))+)/);
-        extractedTitle = tm ? tm[1].trim().replace(/\.+$/, '') : afterYear.split(/\.\s+/)[0].trim();
-      } else {
-        const ym = [...contentNoUrl.matchAll(/(?<![0-9])((?:19|20)\d{2})(?![0-9])/g)];
-        if (ym.length > 0) year = parseInt(ym[ym.length - 1][1], 10);
-        const segs = contentNoUrl.split(/\.\s+/).map(s => s.trim()).filter(Boolean);
-        if (segs.length >= 2) {
-          authors = extractAuthorsFromSegment(segs[0]);
-          extractedTitle = segs[1].replace(/\.+$/, '');
-        }
-      }
-
-      return {
-        ref_id: refId,
-        raw_text: cleaned,
-        authors,
-        first_author: authors[0] || null,
-        year,
-        extracted_title: extractedTitle || cleaned,
-        doi,
-        url,
-        claimed_pages: claimedPages
+    function getStatusBadgeHtml(status, sourceDb) {
+      const map = {
+        VERIFIED: { bg: "bg-emerald-50 text-emerald-700 border-emerald-200", label: "✓ Doğrulandı (DOI)" },
+        VERIFIED_BY_TITLE_AUTHOR: { bg: "bg-teal-50 text-teal-700 border-teal-200", label: "✓ İsim & Yazardan Doğrulandı" },
+        WEB_OR_DOCUMENTATION_SOURCE: { bg: "bg-blue-50 text-blue-700 border-blue-200", label: "Web / Dokümantasyon" },
+        METADATA_MISMATCH: { bg: "bg-amber-50 text-amber-800 border-amber-200", label: "⚠ Yazar / Yıl Uyuşmazlığı" },
+        TITLE_MISMATCH_WARNING: { bg: "bg-amber-50 text-amber-800 border-amber-200", label: "⚠ Başlık / Yazar Uyarısı" },
+        INVALID_DOI_BUT_PAPER_EXISTS: { bg: "bg-orange-50 text-orange-800 border-orange-200", label: "⚠ DOI Hatalı Ama Eser Bulundu" },
+        FAKE_OR_NOT_FOUND: { bg: "bg-rose-50 text-rose-700 border-rose-200", label: "✕ Bulunamadı / Geçersiz DOI" },
+        UNVERIFIED_NO_MATCH: { bg: "bg-slate-100 text-slate-700 border-slate-200", label: "? Eşleşme Bulunamadı" }
       };
-    }
-
-    function extractNumberedCitations(text) {
-      const set = new Set();
-      const matches = [...(text || '').matchAll(/(?<![a-zA-Z0-9_])\[([\d\s,\-–—]+)\]/g)];
-      for (const m of matches) {
-        const parts = m[1].replace(/[–—]/g, '-').split(',').map(p => p.trim());
-        for (const part of parts) {
-          if (part.includes('-')) {
-            const [s, e] = part.split('-').map(x => parseInt(x.trim(), 10));
-            if (s > 0 && e >= s && e <= 1000) {
-              for (let k = s; k <= e; k++) set.add(k);
-            }
-          } else if (/^\d+$/.test(part)) {
-            const v = parseInt(part, 10);
-            if (v > 0 && v <= 1000) set.add(v);
-          }
-        }
+      const st = map[status] || { bg: "bg-slate-100 text-slate-700 border-slate-200", label: status };
+      let dbTag = '';
+      if (sourceDb) {
+        dbTag = `<span class="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 border border-slate-200">${sourceDb}</span>`;
       }
-      return set;
-    }
-
-    function extractApaCitations(text) {
-      const list = [];
-      const placeholders = new Set(['yazar', 'author', 'surname', 'soyadi', 'isim', 'ornek', 'ip']);
-
-      const parenMatches = [...(text || '').matchAll(/\(\s*([A-ZÇĞİÖŞÜÂÎÛ][a-zçğıöşüâîûA-ZÇĞİÖŞÜ\-\.\s&,;]+?,\s*(?:19|20)\d{2}[a-z]?(?:,\s*(?:s\.|ss\.|p\.|pp\.)\s*\d+(?:-\d+)?)?)\s*\)/g)];
-      for (const m of parenMatches) {
-        const subs = m[1].split(';').map(s => s.trim()).filter(Boolean);
-        for (const sub of subs) {
-          const ym = sub.match(/,\s*((?:19|20)\d{2})([a-z]?)\b/);
-          if (!ym) continue;
-          const authorPart = sub.slice(0, ym.index).trim();
-          const fw = authorPart.match(/^([A-ZÇĞİÖŞÜÂÎÛ][a-zçğıöşüâîûA-ZÇĞİÖŞÜ\-\']+)/);
-          if (!fw) continue;
-          const surname = fw[1];
-          if (placeholders.has(normalizeText(surname))) continue;
-          list.push({
-            raw_match: m[0],
-            first_author: surname,
-            year: parseInt(ym[1], 10),
-            citation_type: 'parenthetical_apa'
-          });
-        }
-      }
-
-      const narrMatches = [...(text || '').matchAll(/\b([A-ZÇĞİÖŞÜÂÎÛ][a-zçğıöşüâîû\-\']+(?:\s+(?:ve\s+ark\.|vd\.|et\s+al\.|(?:&|ve|and)\s+[A-ZÇĞİÖŞÜÂÎÛ][a-zçğıöşüâîû\-\']+))?)\s*\(\s*((?:19|20)\d{2}[a-z]?)\s*\)/g)];
-      for (const m of narrMatches) {
-        const fw = m[1].trim().match(/^([A-ZÇĞİÖŞÜÂÎÛ][a-zçğıöşüâîûA-ZÇĞİÖŞÜ\-\']+)/);
-        if (!fw) continue;
-        const surname = fw[1];
-        if (placeholders.has(normalizeText(surname))) continue;
-        list.push({
-          raw_match: m[0],
-          first_author: surname,
-          year: parseInt(m[2].slice(0, 4), 10),
-          citation_type: 'narrative_apa'
-        });
-      }
-      return list;
-    }
-
-    async function verifySingleReferenceInBrowser(refInfo, threshold, contextSentences) {
-      const doi = refInfo.doi;
-      const extractedTitle = refInfo.extracted_title || refInfo.raw_text;
-      const claimedAuthors = refInfo.authors || [];
-      const claimedYear = refInfo.year;
-      const claimedPages = refInfo.claimed_pages;
-      const url = refInfo.url;
-
-      let candidate = null;
-      let verificationMethod = "";
-      let brokenDoiDetected = false;
-
-      if (doi) {
-        try {
-          const resp = await fetch(`https://api.crossref.org/works/${encodeURIComponent(doi)}`);
-          if (resp.ok) {
-            const data = await resp.json();
-            const msg = data.message || {};
-            candidate = {
-              source_api: "Crossref",
-              title: (msg.title && msg.title[0]) || "",
-              authors: (msg.author || []).map(a => a.family || a.name || "").filter(Boolean),
-              year: msg.issued?.['date-parts']?.[0]?.[0] || null,
-              pages: msg.page || null,
-              doi: msg.DOI || doi
-            };
-            verificationMethod = "DOI ile Doğrulama (Crossref)";
-          } else if (resp.status === 404) {
-            brokenDoiDetected = true;
-          }
-        } catch (err) {}
-      }
-
-      if (!candidate) {
-        try {
-          const oaResp = await fetch(`https://api.openalex.org/works?search=${encodeURIComponent(extractedTitle)}&per-page=3`);
-          if (oaResp.ok) {
-            const oaData = await oaResp.json();
-            const results = oaData.results || [];
-            for (const item of results) {
-              const cTitle = item.title || item.display_name || "";
-              const sim = Math.max(levenshteinSimilarity(cTitle, extractedTitle), levenshteinSimilarity(cTitle, refInfo.raw_text));
-              if (sim >= 65) {
-                candidate = {
-                  source_api: "OpenAlex",
-                  title: cTitle,
-                  authors: (item.authorships || []).map(a => (a.author?.display_name || "").split(/\s+/).pop()).filter(Boolean),
-                  year: item.publication_year || null,
-                  pages: item.biblio?.first_page ? `${item.biblio.first_page}-${item.biblio.last_page || item.biblio.first_page}` : null,
-                  doi: item.doi ? item.doi.replace(/^https?:\/\/(?:dx\.)?doi\.org\//i, '') : null
-                };
-                verificationMethod = brokenDoiDetected ? "Hatalı DOI — Başlık ve Yazardan Bulundu" : "Başlık ve Yazardan Doğrulama (OpenAlex)";
-                break;
-              }
-            }
-          }
-        } catch (err) {}
-      }
-
-      if (!candidate) {
-        try {
-          const crResp = await fetch(`https://api.crossref.org/works?query.bibliographic=${encodeURIComponent(extractedTitle)}&rows=3`);
-          if (crResp.ok) {
-            const crData = await crResp.json();
-            const items = crData.message?.items || [];
-            for (const item of items) {
-              const cTitle = (item.title && item.title[0]) || "";
-              const sim = Math.max(levenshteinSimilarity(cTitle, extractedTitle), levenshteinSimilarity(cTitle, refInfo.raw_text));
-              if (sim >= 65) {
-                candidate = {
-                  source_api: "Crossref",
-                  title: cTitle,
-                  authors: (item.author || []).map(a => a.family || a.name || "").filter(Boolean),
-                  year: item.issued?.['date-parts']?.[0]?.[0] || null,
-                  pages: item.page || null,
-                  doi: item.DOI || null
-                };
-                verificationMethod = brokenDoiDetected ? "Hatalı DOI — Başlık ve Yazardan Bulundu" : "Başlık ve Yazardan Doğrulama (Crossref)";
-                break;
-              }
-            }
-          }
-        } catch (err) {}
-      }
-
-      if (!candidate) {
-        if (doi) {
-          return {
-            status: "FAKE_OR_NOT_FOUND",
-            source_database: "Crossref + OpenAlex",
-            title_similarity_percent: 0,
-            author_check: "Bulunamadı",
-            year_check: "Bulunamadı",
-            message: `Yazılan DOI (${doi}) ile ya da başlık/yazar aramasıyla eşleşen bir yayın bulunamadı.`
-          };
-        }
-        if (url) {
-          return {
-            status: "WEB_OR_DOCUMENTATION_SOURCE",
-            source_database: "Web Kaynağı",
-            title_similarity_percent: 100,
-            author_check: "Web / Dokümantasyon",
-            year_check: claimedYear ? String(claimedYear) : "-",
-            message: `Akademik DOI içermeyen web/dokümantasyon kaynağı (${url}).`
-          };
-        }
-        return {
-          status: "UNVERIFIED_NO_MATCH",
-          source_database: "Crossref + OpenAlex",
-          title_similarity_percent: 0,
-          author_check: "Bulunamadı",
-          year_check: "Bulunamadı",
-          message: "Başlık ve yazar bilgisiyle eşleşen bir hakemli yayın bulunamadı."
-        };
-      }
-
-      const titleSim = Math.max(
-        levenshteinSimilarity(candidate.title, extractedTitle),
-        levenshteinSimilarity(candidate.title, refInfo.raw_text)
-      );
-      const titleOk = titleSim >= threshold;
-
-      const normRealAuthors = (candidate.authors || []).map(a => normalizeText(a)).filter(Boolean);
-      const normClaimedAuthors = claimedAuthors.map(a => normalizeText(a)).filter(Boolean);
-      const normRaw = normalizeText(refInfo.raw_text);
-
-      let matchedAuthors = 0;
-      for (const ra of normRealAuthors) {
-        const lastToken = ra.split(' ').pop();
-        if (normClaimedAuthors.some(ca => ca.includes(lastToken) || lastToken.includes(ca)) || (lastToken.length >= 3 && normRaw.includes(lastToken))) {
-          matchedAuthors++;
-        }
-      }
-
-      let authorStatus = "Doğru";
-      let authorOk = true;
-      if (normRealAuthors.length > 0 && matchedAuthors === 0) {
-        authorStatus = `Uyuşmuyor (Gerçek: ${candidate.authors.slice(0, 3).join(', ')})`;
-        authorOk = false;
-      }
-
-      let yearStatus = "Doğru";
-      let yearOk = true;
-      if (claimedYear && candidate.year) {
-        const diff = Math.abs(claimedYear - candidate.year);
-        if (diff === 1) {
-          yearStatus = `±1 Yıl Fark (Gerçek: ${candidate.year})`;
-        } else if (diff > 1) {
-          yearStatus = `Uyuşmuyor (Gerçek: ${candidate.year}, Yazılan: ${claimedYear})`;
-          yearOk = false;
-        }
-      }
-
-      let status = "VERIFIED";
-      let message = `${verificationMethod} üzerinden doğrulandı.`;
-
-      if (brokenDoiDetected) {
-        status = "INVALID_DOI_BUT_PAPER_EXISTS";
-        message = `Yazılan DOI (${doi}) hatalı, ancak eser başlık ve yazardan (${candidate.source_api}) bulundu.`;
-      } else if (!titleOk || !authorOk || !yearOk) {
-        status = "METADATA_MISMATCH";
-        const issues = [];
-        if (!titleOk) issues.push(`Başlık benzerliği düşük (%${titleSim})`);
-        if (!authorOk) issues.push(`Yazar uyuşmazlığı`);
-        if (!yearOk) issues.push(`Yıl uyuşmazlığı`);
-        message = `Dikkat: ${issues.join(', ')}.`;
-      } else if (!doi) {
-        status = "VERIFIED_BY_TITLE_AUTHOR";
-      }
-
-      return {
-        status,
-        source_database: candidate.source_api,
-        real_title: candidate.title,
-        discovered_doi: candidate.doi,
-        title_similarity_percent: titleSim,
-        author_check: authorStatus,
-        year_check: yearStatus,
-        sample_sentence: contextSentences[0] || "",
-        message
-      };
-    }
-
-    async function extractParagraphsFromDocxBlob(fileBlob) {
-      const arrayBuffer = await fileBlob.arrayBuffer();
-      const zip = await JSZip.loadAsync(arrayBuffer);
-      const docXmlFile = zip.file("word/document.xml");
-      if (!docXmlFile) {
-        throw new Error("Geçerli bir Word (.docx) dosyası okunamadı.");
-      }
-      const xmlText = await docXmlFile.async("string");
-      const parser = new DOMParser();
-      const xmlDoc = parser.parseFromString(xmlText, "application/xml");
-
-      const bodyNode = xmlDoc.getElementsByTagName("w:body")[0];
-      if (!bodyNode) return [];
-
-      const paragraphs = [];
-      for (const child of bodyNode.childNodes) {
-        if (child.nodeName === "w:p") {
-          const texts = [...child.getElementsByTagName("w:t")].map(t => t.textContent || "");
-          const pStr = texts.join("").trim();
-          if (pStr) paragraphs.push(pStr);
-        } else if (child.nodeName === "w:tbl") {
-          const rows = [...child.getElementsByTagName("w:tr")];
-          for (const row of rows) {
-            const cells = [...row.getElementsByTagName("w:tc")];
-            const rowVals = [];
-            for (const cell of cells) {
-              const cellTexts = [...cell.getElementsByTagName("w:t")].map(t => t.textContent || "");
-              const ct = cellTexts.join("").trim();
-              if (ct && (rowVals.length === 0 || rowVals[rowVals.length - 1] !== ct)) {
-                rowVals.push(ct);
-              }
-            }
-            if (rowVals.length > 0) paragraphs.push(rowVals.join(" | "));
-          }
-        }
-      }
-      return paragraphs;
+      return `<span class="text-xs font-semibold px-2.5 py-0.5 rounded-full border ${st.bg}">${st.label}</span> ${dbTag}`;
     }
 
     async function analyzeWithBackend(file) {
@@ -589,22 +188,22 @@
       const progressStep = document.getElementById('progressStepText');
 
       progressSection.classList.remove('hidden');
-      progressFill.style.width = '30%';
-      progressPercent.textContent = '30%';
-      progressStep.textContent = 'Belge Python FastAPI backend sunucusuna iletiliyor...';
+      progressFill.style.width = '25%';
+      progressPercent.textContent = '25%';
+      progressStep.textContent = 'Belge FastAPI backend sunucusuna iletiliyor...';
 
       const formData = new FormData();
       formData.append('file', file);
 
-      let stepCount = 35;
+      let stepCount = 30;
       const interval = setInterval(() => {
-        if (stepCount < 85) {
-          stepCount += 8;
+        if (stepCount < 88) {
+          stepCount += 7;
           progressFill.style.width = `${stepCount}%`;
           progressPercent.textContent = `${stepCount}%`;
-          progressStep.textContent = 'Crossref, OpenAlex, DataCite ve Semantic Scholar üzerinden taranıyor...';
+          progressStep.textContent = 'Akademik veri tabanları taranıyor...';
         }
-      }, 1000);
+      }, 900);
 
       try {
         const response = await fetch(appState.backendUrl, {
@@ -627,7 +226,7 @@
 
         progressFill.style.width = '100%';
         progressPercent.textContent = '100%';
-        progressStep.textContent = 'Doğrulama ve analiz tamamlandı!';
+        progressStep.textContent = 'Doğrulama tamamlandı!';
         setTimeout(() => progressSection.classList.add('hidden'), 400);
 
         const cc = data.citation_consistency || {};
@@ -649,202 +248,6 @@
         clearInterval(interval);
         throw err;
       }
-    }
-
-    async function analyzeParagraphsLocally(paragraphs) {
-      const progressSection = document.getElementById('progressSection');
-      const progressFill = document.getElementById('progressBarFill');
-      const progressPercent = document.getElementById('progressPercentText');
-      const progressStep = document.getElementById('progressStepText');
-
-      progressSection.classList.remove('hidden');
-      progressFill.style.width = '15%';
-      progressPercent.textContent = '15%';
-      progressStep.textContent = 'Metin içi atıflar ve kaynakça ayrıştırılıyor...';
-
-      const headerIndices = [];
-      paragraphs.forEach((p, idx) => {
-        if (isBibliographyHeader(p)) headerIndices.push(idx);
-      });
-
-      const bibStartIdx = headerIndices.length > 0 ? headerIndices[headerIndices.length - 1] : paragraphs.length;
-      const bodyText = paragraphs.slice(0, bibStartIdx).join('\n');
-      const bibLines = paragraphs.slice(bibStartIdx + 1);
-
-      const bibEntries = {};
-      const duplicateRefs = [];
-      const seenDois = {};
-      const seenTitles = {};
-      let autoIdx = 1;
-
-      for (const line of bibLines) {
-        const parsed = parseBibliographyLine(line, autoIdx);
-        if (!parsed) continue;
-        let rNum = parsed.ref_id;
-
-        if (bibEntries[rNum]) {
-          duplicateRefs.push(`[${rNum}] numarası kaynakçada birden fazla kez kullanılmış.`);
-          while (bibEntries[rNum]) rNum += 1000;
-          parsed.ref_id = rNum;
-        }
-
-        if (parsed.doi) {
-          const dLow = parsed.doi.toLowerCase();
-          if (seenDois[dLow]) {
-            duplicateRefs.push(`Kaynak [${rNum}] ile Kaynak [${seenDois[dLow]}] aynı DOI'ye (${parsed.doi}) sahip.`);
-          } else {
-            seenDois[dLow] = rNum;
-          }
-        }
-
-        const normT = normalizeText(parsed.extracted_title);
-        if (normT.length >= 20) {
-          if (seenTitles[normT]) {
-            duplicateRefs.push(`Kaynak [${rNum}] ile Kaynak [${seenTitles[normT]}] aynı başlığa sahip.`);
-          } else {
-            seenTitles[normT] = rNum;
-          }
-        }
-
-        bibEntries[rNum] = parsed;
-        autoIdx++;
-      }
-
-      const citedNumbers = extractNumberedCitations(bodyText);
-      const sentences = bodyText.split(/(?<=[\.\!\?])\s+|\n+/).map(s => s.trim()).filter(Boolean);
-
-      const bibBySurname = {};
-      Object.values(bibEntries).forEach(entry => {
-        (entry.authors || []).forEach(a => {
-          const na = normalizeText(a);
-          if (na) {
-            if (!bibBySurname[na]) bibBySurname[na] = [];
-            bibBySurname[na].push(entry);
-          }
-        });
-      });
-
-      const mentionMismatches = [];
-      const matchedBibIdsViaApa = new Set();
-      const unmatchedApaCitations = [];
-      const contextsByRef = {};
-
-      for (const sentence of sentences) {
-        const numsInSent = [...extractNumberedCitations(sentence)];
-        const apasInSent = extractApaCitations(sentence);
-        let pairedChecked = false;
-
-        if (numsInSent.length > 0) {
-          for (const rNum of numsInSent) {
-            if (!contextsByRef[rNum]) contextsByRef[rNum] = [];
-            contextsByRef[rNum].push(sentence);
-
-            const bibItem = bibEntries[rNum];
-            if (bibItem && numsInSent.length === 1 && apasInSent.length === 1 && apasInSent[0].citation_type === 'narrative_apa') {
-              pairedChecked = true;
-              const claimedApa = apasInSent[0];
-              const claimedSurname = normalizeText(claimedApa.first_author);
-              const claimedYear = claimedApa.year;
-              const bibAuthorsNorm = (bibItem.authors || []).map(a => normalizeText(a));
-              const authorOk = bibAuthorsNorm.length === 0 || bibAuthorsNorm.some(ba => ba.includes(claimedSurname) || claimedSurname.includes(ba));
-              const yearOk = !bibItem.year || bibItem.year === claimedYear;
-
-              if (!authorOk || !yearOk) {
-                mentionMismatches.push({
-                  message: `Metin içinde [${rNum}] numaralı kaynağa "${claimedApa.first_author} (${claimedYear})" olarak atıf yapılmış ancak kaynakçada [${rNum}] numaralı eser "${bibItem.first_author || 'Bilinmiyor'} (${bibItem.year || '?'})" olarak kayıtlı.`,
-                  sentence
-                });
-              }
-            }
-          }
-        }
-
-        if (pairedChecked) continue;
-
-        for (const apaCit of apasInSent) {
-          const sNorm = normalizeText(apaCit.first_author);
-          const cands = bibBySurname[sNorm] || [];
-          if (cands.length > 0) {
-            const exactYear = cands.filter(c => c.year === apaCit.year);
-            if (exactYear.length > 0) {
-              exactYear.forEach(c => {
-                matchedBibIdsViaApa.add(c.ref_id);
-                if (!contextsByRef[c.ref_id]) contextsByRef[c.ref_id] = [];
-                contextsByRef[c.ref_id].push(sentence);
-              });
-            } else {
-              const actualYears = [...new Set(cands.map(c => c.year))].join(', ');
-              cands.forEach(c => matchedBibIdsViaApa.add(c.ref_id));
-              mentionMismatches.push({
-                message: `Metin içinde "${apaCit.raw_match}" olarak bahsedilmiş ancak kaynakçada "${apaCit.first_author}" yazarının eseri ${actualYears} yılına ait.`,
-                sentence
-              });
-            }
-          } else {
-            unmatchedApaCitations.push(apaCit.raw_match);
-          }
-        }
-      }
-
-      const bibKeys = Object.keys(bibEntries).map(Number);
-      const allCitedBibIds = new Set([...citedNumbers, ...matchedBibIdsViaApa]);
-      const missingNumbered = [...citedNumbers].filter(n => !bibEntries[n]).sort((a, b) => a - b);
-      const unusedInText = bibKeys.filter(k => !allCitedBibIds.has(k)).sort((a, b) => a - b);
-
-      const verifiedReferences = [];
-      const entriesList = Object.values(bibEntries);
-
-      for (let i = 0; i < entriesList.length; i++) {
-        const info = entriesList[i];
-        const pct = Math.round(20 + ((i + 1) / Math.max(entriesList.length, 1)) * 75);
-        progressFill.style.width = `${pct}%`;
-        progressPercent.textContent = `${pct}%`;
-        progressStep.textContent = `Kaynak [${info.ref_id}/${entriesList.length}] doğrulanıyor...`;
-
-        const verRes = await verifySingleReferenceInBrowser(
-          info,
-          appState.similarityThreshold,
-          contextsByRef[info.ref_id] || []
-        );
-
-        verifiedReferences.push({
-          ref_number: info.ref_id,
-          raw_citation: info.raw_text,
-          doi_in_document: info.doi,
-          in_text_mention_count: (contextsByRef[info.ref_id] || []).length,
-          verification: verRes
-        });
-      }
-
-      progressFill.style.width = '100%';
-      progressPercent.textContent = '100%';
-      setTimeout(() => progressSection.classList.add('hidden'), 350);
-
-      appState.lastAnalysisResult = {
-        missingNumbered,
-        unmatchedApaCitations: [...new Set(unmatchedApaCitations)],
-        unusedInText,
-        duplicateRefs,
-        mentionMismatches,
-        verifiedReferences
-      };
-
-      renderResults();
-    }
-
-    function getStatusBadgeHtml(status) {
-      const map = {
-        VERIFIED: { bg: "bg-emerald-50 text-emerald-700 border-emerald-200", label: "✓ Doğrulandı (DOI)" },
-        VERIFIED_BY_TITLE_AUTHOR: { bg: "bg-teal-50 text-teal-700 border-teal-200", label: "✓ İsim & Yazardan Doğrulandı" },
-        WEB_OR_DOCUMENTATION_SOURCE: { bg: "bg-blue-50 text-blue-700 border-blue-200", label: "Web / Dokümantasyon" },
-        METADATA_MISMATCH: { bg: "bg-amber-50 text-amber-800 border-amber-200", label: "⚠ Yazar / Yıl Uyuşmazlığı" },
-        TITLE_MISMATCH_WARNING: { bg: "bg-amber-50 text-amber-800 border-amber-200", label: "⚠ Başlık / Yazar Uyarısı" },
-        INVALID_DOI_BUT_PAPER_EXISTS: { bg: "bg-orange-50 text-orange-800 border-orange-200", label: "⚠ DOI Hatalı Ama Eser Bulundu" },
-        FAKE_OR_NOT_FOUND: { bg: "bg-rose-50 text-rose-700 border-rose-200", label: "✕ Bulunamadı / Geçersiz DOI" },
-        UNVERIFIED_NO_MATCH: { bg: "bg-slate-100 text-slate-700 border-slate-200", label: "? Eşleşme Bulunamadı" }
-      };
-      const st = map[status] || { bg: "bg-slate-100 text-slate-700 border-slate-200", label: status };
-      return `<span class="text-xs font-semibold px-2.5 py-0.5 rounded-full border ${st.bg}">${st.label}</span>`;
     }
 
     function renderResults() {
@@ -928,7 +331,7 @@
             <div class="flex items-center justify-between gap-2 flex-wrap">
               <div class="flex items-center gap-2 flex-wrap">
                 <span class="px-2 py-0.5 rounded bg-slate-900 text-white font-bold text-xs">[${item.ref_number}]</span>
-                ${getStatusBadgeHtml(v.status)}
+                ${getStatusBadgeHtml(v.status, v.source_database)}
               </div>
               <span class="text-xs text-slate-500">Metin içi geçiş: <strong>${item.in_text_mention_count || 0} kez</strong></span>
             </div>
@@ -937,7 +340,7 @@
               ${item.raw_citation}
             </p>
 
-            ${v.real_title ? `<p class="text-xs text-slate-600"><strong>Bulunan Eser:</strong> ${v.real_title} ${v.source_database ? `<span class="text-slate-400">(${v.source_database})</span>` : ''}</p>` : ''}
+            ${v.real_title ? `<p class="text-xs text-slate-600"><strong>Doğrulanan Başlık:</strong> ${v.real_title}</p>` : ''}
 
             <p class="text-xs font-medium text-slate-700">
               ${v.message || ''}
@@ -1008,20 +411,11 @@
         btnAnalyzeFile.textContent = 'Denetleniyor...';
 
         try {
-          // 1. Öncelik: Python FastAPI backend (http://127.0.0.1:8000/analyze)
           await analyzeWithBackend(appState.selectedFile);
-          showToast('Belge Python backend üzerinden başarıyla denetlendi.');
+          showToast('Belge başarıyla denetlendi.');
         } catch (backendErr) {
-          console.warn('Backend bağlantısı kurulamadı, tarayıcı içi motora geçiliyor:', backendErr);
-          showToast(`Backend uyarısı: ${backendErr.message}. Tarayıcı içi denetim başlatılıyor...`);
-          try {
-            // 2. Yedek: Tarayıcı içi JS motoru
-            const paragraphs = await extractParagraphsFromDocxBlob(appState.selectedFile);
-            await analyzeParagraphsLocally(paragraphs);
-            showToast('Belge tarayıcı içi motor ile denetlendi.');
-          } catch (localErr) {
-            showToast(`Hata: ${localErr.message}`);
-          }
+          console.warn('Backend hatası:', backendErr);
+          showToast(`Hata: ${backendErr.message}. Lütfen terminalde backend sunucusunun açık olduğunu kontrol edin.`);
         } finally {
           btnAnalyzeFile.disabled = false;
           btnAnalyzeFile.textContent = 'Belgeyi Denetle';
