@@ -3,7 +3,16 @@ import unicodedata
 from typing import Any
 from docx.text.paragraph import Paragraph
 from docx.table import Table
+import re
+import unicodedata
+from typing import Any
+from docx.text.paragraph import Paragraph
+from docx.table import Table
 
+try:
+    import fitz  # PyMuPDF
+except ImportError:
+    fitz = None
 
 # ---------------------------------------------------------------------------
 # 1. BELGE OKUMA YARDIMCISI (Paragraflar + Tablolar)
@@ -38,6 +47,134 @@ def extract_all_paragraphs(doc: Any) -> list[str]:
 
     return paragraphs
 
+def extract_paragraphs_from_pdf(pdf_bytes: bytes) -> list[str]:
+    """
+    PDF dosyasından metin bloklarını okur:
+    - Çift sütunlu (IEEE/ACM) makaleleri okuma sırasına göre (sort=True) çözer.
+    - Sayfa üst/alt bilgilerini (Header/Footer) ve tekil sayfa numaralarını filtreler.
+    - Satır sonu kelime bölünmelerini (tireleme) ve Unicode ligatürlerini (ﬁ, ﬂ) düzeltir.
+    """
+    if fitz is None:
+        raise RuntimeError(
+            "PDF analizi için PyMuPDF kütüphanesi gereklidir. "
+            "Lütfen terminalde 'pip install pymupdf' komutunu çalıştırın."
+        )
+
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    paragraphs: list[str] = []
+
+    for page in doc:
+        page_height = page.rect.height
+        # sort=True parametresi çift sütunlu akademik makalelerde önce sol sütunu, sonra sağ sütunu okur
+        blocks = page.get_text("blocks", sort=True)
+
+        for b in blocks:
+            # b: (x0, y0, x1, y1, "metin", block_no, block_type)
+            if len(b) >= 7 and b[6] != 0:  # 0 dışındakiler resim/grafik bloklarıdır
+                continue
+
+            x0, y0, x1, y1, raw_text = b[0], b[1], b[2], b[3], b[4]
+            if not raw_text or not raw_text.strip():
+                continue
+
+            # Sayfanın en üst %5'lik ve en alt %5'lik kısmındaki kısa sayfa numarası / üst bilgi gürültüsünü atla
+            if (y0 < page_height * 0.04 or y1 > page_height * 0.96) and len(raw_text.strip()) < 65:
+                if re.match(r'^[\d\s\-–—/]+$', raw_text.strip()) or "page" in raw_text.lower() or "sayfa" in raw_text.lower():
+                    continue
+
+            # Ligatürleri (ﬁ -> fi, ﬂ -> fl) normalize et
+            cleaned_block = unicodedata.normalize("NFKC", raw_text)
+
+            # Satır sonu tirelemesini düzelt (örn: "algo-\nrithm" -> "algorithm", ancak DOI/URL'leri bozma)
+            cleaned_block = re.sub(r'([a-zçğıöşüA-ZÇĞİÖŞÜ])-\s*\n\s*([a-zçğıöşü])', r'\1\2', cleaned_block)
+
+            lines = [line.strip() for line in cleaned_block.splitlines() if line.strip()]
+            if not lines:
+                continue
+
+            # Eğer blok içinde "Kaynakça / References" başlığı tek başına bir satır olarak geçiyorsa onu ayrı tut
+            current_chunk: list[str] = []
+            for line in lines:
+                # Tek başına duran sayfa numarası satırlarını atla
+                if re.match(r'^\d{1,4}$', line):
+                    continue
+
+                if is_bibliography_header(line) or is_section_heading_after_bib(line):
+                    if current_chunk:
+                        paragraphs.append(" ".join(current_chunk))
+                        current_chunk = []
+                    paragraphs.append(line)
+                elif re.match(r'^(?:\[\d+\]|\d+[\.\)\-])\s+', line):
+                    # Numaralı yeni bir kaynakça satırı başlıyorsa önceki birikeni kaydet
+                    if current_chunk:
+                        paragraphs.append(" ".join(current_chunk))
+                    current_chunk = [line]
+                else:
+                    current_chunk.append(line)
+
+            if current_chunk:
+                paragraphs.append(" ".join(current_chunk))
+
+    doc.close()
+    return paragraphs
+
+
+def merge_multiline_bibliography(raw_bib_lines: list[str]) -> list[str]:
+    """
+    PDF'ten çıkarılan kaynakça satırlarında, tek bir kaynak birden fazla satıra/bloğa
+    bölünmüşse bunları birleştirerek her elemanın tam bir kaynakça maddesi olmasını sağlar.
+    """
+    if not raw_bib_lines:
+        return []
+
+    merged: list[str] = []
+
+    # Yeni bir kaynakça maddesinin başlangıcını yakalayan kalıplar:
+    # 1) Numaralı: "[1] ...", "1. ...", "1) ..."
+    numbered_start_re = re.compile(r'^(?:\[\d+\]|\d{1,3}[\.\)\-])\s+[A-ZÇĞİÖŞÜÂÎÛ"\'“]')
+    # 2) APA / Harvard (Soyadı, A. ... (2020) veya Kurum Adı. (2020))
+    apa_author_start_re = re.compile(
+        r'^[A-ZÇĞİÖŞÜÂÎÛ][a-zçğıöşüâîûA-ZÇĞİÖŞÜ\-\']+,\s*(?:[A-ZÇĞİÖŞÜ]\.|[A-ZÇĞİÖŞÜ][a-zçğıöşü]+)'
+    )
+    has_year_parens_re = re.compile(r'\(\s*(?:19|20)\d{2}[a-z]?\s*\)')
+
+    # Kaynakçada numaralı sistem mi yoksa APA sistemi mi baskın kontrol et
+    numbered_count = sum(1 for l in raw_bib_lines if numbered_start_re.match(l.strip()))
+    is_mostly_numbered = numbered_count >= max(1, len(raw_bib_lines) // 4)
+
+    for line in raw_bib_lines:
+        cleaned = line.strip()
+        if not cleaned:
+            continue
+
+        # Tek başına sayfa numarası kalmışsa atla
+        if re.match(r'^\d{1,4}$', cleaned):
+            continue
+
+        is_new_entry = False
+        if is_mostly_numbered:
+            if numbered_start_re.match(cleaned):
+                is_new_entry = True
+        else:
+            if (
+                numbered_start_re.match(cleaned)
+                or apa_author_start_re.match(cleaned)
+                or (has_year_parens_re.search(cleaned[:75]) and cleaned[0].isupper())
+            ):
+                is_new_entry = True
+
+        if is_new_entry or not merged:
+            merged.append(cleaned)
+        else:
+            # Eğer önceki satır bir URL veya DOI'nin ortasında tire/slash ile bölünmüşse boşluksuz birleştir
+            if merged[-1].endswith(("/", "-", "_")) and (
+                "http" in merged[-1].lower() or "10." in merged[-1] or "doi" in merged[-1].lower()
+            ):
+                merged[-1] = f"{merged[-1]}{cleaned}"
+            else:
+                merged[-1] = f"{merged[-1]} {cleaned}"
+
+    return merged
 
 # ---------------------------------------------------------------------------
 # 2. YARDIMCI NORMALİZASYON VE BAŞLIK KONTROL FONKSİYONLARI
@@ -523,6 +660,8 @@ def parse_document_sections(paragraphs: list[str]):
             if is_section_heading_after_bib(cleaned):
                 break
             bibliography_lines.append(cleaned)
+
+        bibliography_lines = merge_multiline_bibliography(bibliography_lines)
     else:
         body_text_parts = [p.strip() for p in paragraphs if p.strip()]
         bibliography_lines = []

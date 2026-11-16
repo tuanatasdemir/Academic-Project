@@ -24,7 +24,7 @@
         <p class="text-xs sm:text-sm text-slate-500">Metin içi atıf tutarlılığı ile DOI, başlık ve yazar doğrulama aracı</p>
       </div>
       <span class="text-xs font-medium px-2.5 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
-        .docx Denetleyici
+        .docx & .pdf Denetleyici
       </span>
     </div>
   </header>
@@ -45,12 +45,12 @@
           📄
         </div>
         <p id="fileNameDisplay" class="text-sm sm:text-base font-semibold text-slate-800">
-          Word (.docx) belgenizi buraya sürükleyin veya seçmek için tıklayın
+          Word (.docx) veya PDF (.pdf) belgenizi buraya sürükleyin veya seçmek için tıklayın
         </p>
         <p class="text-xs text-slate-500 mt-1">
           Belgenizdeki metin içi atıflar ile kaynakça listesi karşılaştırılır; DOI, başlık ve yazar bilgileri doğrulanır.
         </p>
-        <input id="docxFileInput" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" class="sr-only" />
+        <input id="docxFileInput" type="file" accept=".docx,.pdf,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" class="sr-only" />
       </div>
 
       <div class="mt-4 flex items-center justify-between pt-4 border-t border-slate-100 flex-wrap gap-2">
@@ -372,8 +372,9 @@
       const fileNameDisplay = document.getElementById('fileNameDisplay');
 
       function handleFileSelected(file) {
-        if (!file || !file.name.toLowerCase().endsWith('.docx')) {
-          showToast('Lütfen geçerli bir .docx (Word) dosyası seçin.');
+        const fileName = file ? file.name.toLowerCase() : '';
+        if (!file || (!fileName.endsWith('.docx') && !fileName.endsWith('.pdf'))) {
+          showToast('Lütfen geçerli bir .docx (Word) veya .pdf dosyası seçin.');
           return;
         }
         appState.selectedFile = file;
