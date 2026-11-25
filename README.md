@@ -2,9 +2,9 @@
 
 > **Lisans Bitirme Projesi**  
 > **Üniversite / Bölüm:** Tekirdağ Namık Kemal Üniversitesi — Bilgisayar Mühendisliği  
-> **Geliştirici:** [Öğrenci Adı Soyadı]  
-> **Danışman:** [Danışman Öğretim Üyesi]  
-> **Akademik Yıl:** [2025–2026]  
+> **Geliştirici:** Nimet Tuana Taşdemir 
+> **Danışman:** Rabia Korkmaz Tan
+> **Akademik Yıl:** [2026-2027]  
 > **Sürüm:** 2.0.0
 
 ---
