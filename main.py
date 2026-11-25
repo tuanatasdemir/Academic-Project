@@ -2,10 +2,12 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 import io
+import re
 import asyncio
 import time
 import os
 import docx
+import httpx
 
 try:
     from app.parsers.citation_regex import (
@@ -35,6 +37,10 @@ except ImportError:
         search_by_title_and_author,
         compute_title_similarity,
     )
+
+API_HEADERS = {
+    "User-Agent": "AcademicCitationVerifier/2.0 (mailto:tuana@nku.edu.tr; Tekirdag Namik Kemal University - Computer Engineering)"
+}
 
 app = FastAPI(
     title="Akademik Kaynakça Doğrulama ve Metin İçi Atıf Tutarlılığı Sistemi",
@@ -127,7 +133,7 @@ def status_endpoint():
 
 
 # ---------------------------------------------------------------------------
-# ANA ANALİZ ENDPOINTİ
+# ANA ANALİZ ENDPOINTİ (.docx & .pdf)
 # ---------------------------------------------------------------------------
 
 @app.post("/analyze")
@@ -149,7 +155,6 @@ async def analyze_document(
 
         # 1. Dosya formatına göre (.pdf veya .docx) paragrafları eksiksiz oku
         if filename_lower.endswith(".pdf"):
-            import re
             import unicodedata
             try:
                 import fitz  # PyMuPDF
@@ -430,3 +435,259 @@ async def search_articles_by_name(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Arama hatası: {str(e)}")
+
+
+# ---------------------------------------------------------------------------
+# BULUNAN MAKALENİN KAYNAKÇASINI ÇEKİP TEK TEK DOĞRULAMA ENDPOINTİ
+# ---------------------------------------------------------------------------
+
+def _parse_year_safe(value) -> int | None:
+    if value is None:
+        return None
+    m = re.search(r'(19|20)\d{2}', str(value))
+    return int(m.group(0)) if m else None
+
+
+async def _fetch_article_references(
+    doi: str | None,
+    title: str | None,
+    max_refs: int = 25
+) -> tuple[str, list[dict]]:
+    """
+    Seçilen makalenin kaynakça listesini sırasıyla Crossref, OpenAlex ve Semantic Scholar
+    üzerinden çeker ve verify_reference_with_crossref uyumlu formata dönüştürür.
+    """
+    clean_doi = re.sub(r'^https?://(?:dx\.)?doi\.org/', '', (doi or '').strip(), flags=re.IGNORECASE)
+    extracted_refs: list[dict] = []
+
+    async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
+        # 1. Crossref üzerinden kaynakça çekme (en zengin yapısal kaynakça listesi)
+        if clean_doi:
+            try:
+                resp = await client.get(f"https://api.crossref.org/works/{clean_doi}", headers=API_HEADERS)
+                if resp.status_code == 200:
+                    raw_refs = (resp.json().get("message") or {}).get("reference") or []
+                    for r in raw_refs[:max_refs]:
+                        ref_doi = r.get("DOI")
+                        ref_title = r.get("article-title") or r.get("volume-title") or r.get("series-title") or ""
+                        ref_author = (r.get("author") or "").strip()
+                        ref_year = _parse_year_safe(r.get("year"))
+                        ref_journal = r.get("journal-title") or ""
+                        ref_page = r.get("first-page")
+                        unstructured = (r.get("unstructured") or "").strip()
+
+                        if unstructured:
+                            raw_text = unstructured
+                        else:
+                            parts = [p for p in [ref_author, f"({ref_year})" if ref_year else "", ref_title, ref_journal, f"DOI: {ref_doi}" if ref_doi else ""] if p]
+                            raw_text = " ".join(parts).strip()
+
+                        if not raw_text and not ref_doi:
+                            continue
+
+                        extracted_refs.append({
+                            "raw_text": raw_text or f"DOI: {ref_doi}",
+                            "extracted_title": ref_title or raw_text,
+                            "authors": [ref_author] if ref_author else [],
+                            "first_author": ref_author or None,
+                            "year": ref_year,
+                            "doi": ref_doi,
+                            "url": None,
+                            "claimed_pages": ref_page
+                        })
+                    if extracted_refs:
+                        return "Crossref", extracted_refs
+            except Exception:
+                pass
+
+        # 2. OpenAlex üzerinden kaynakça (referenced_works) çekme
+        try:
+            work_data = None
+            if clean_doi:
+                resp = await client.get(f"https://api.openalex.org/works/https://doi.org/{clean_doi}", headers=API_HEADERS)
+                if resp.status_code == 200:
+                    work_data = resp.json()
+            elif title:
+                resp = await client.get(
+                    "https://api.openalex.org/works",
+                    params={"search": title.strip(), "per-page": 1},
+                    headers=API_HEADERS
+                )
+                if resp.status_code == 200:
+                    res_list = resp.json().get("results") or []
+                    if res_list:
+                        work_data = res_list[0]
+
+            referenced_urls = (work_data or {}).get("referenced_works") or []
+            if referenced_urls:
+                work_ids = [u.rstrip("/").split("/")[-1] for u in referenced_urls[:max_refs] if "/" in u]
+                if work_ids:
+                    batch_resp = await client.get(
+                        "https://api.openalex.org/works",
+                        params={"filter": f"openalex_id:{'|'.join(work_ids)}", "per-page": len(work_ids)},
+                        headers=API_HEADERS
+                    )
+                    if batch_resp.status_code == 200:
+                        for w in batch_resp.json().get("results") or []:
+                            w_title = (w.get("title") or w.get("display_name") or "").strip()
+                            w_authors = []
+                            for auth in w.get("authorships") or []:
+                                name = (auth.get("author") or {}).get("display_name") or ""
+                                if name:
+                                    w_authors.append(name.strip().split()[-1])
+                            w_year = w.get("publication_year")
+                            raw_w_doi = w.get("doi") or ""
+                            w_doi = re.sub(r'^https?://(?:dx\.)?doi\.org/', '', raw_w_doi, flags=re.IGNORECASE) or None
+                            journal = ((w.get("primary_location") or {}).get("source") or {}).get("display_name") or ""
+
+                            parts = [p for p in [", ".join(w_authors[:3]), f"({w_year})" if w_year else "", w_title, journal] if p]
+                            raw_text = ". ".join(parts)
+
+                            if w_title or w_doi:
+                                extracted_refs.append({
+                                    "raw_text": raw_text or w_title or f"DOI: {w_doi}",
+                                    "extracted_title": w_title or raw_text,
+                                    "authors": w_authors,
+                                    "first_author": w_authors[0] if w_authors else None,
+                                    "year": int(w_year) if w_year else None,
+                                    "doi": w_doi,
+                                    "url": w.get("id"),
+                                    "claimed_pages": None
+                                })
+                        if extracted_refs:
+                            return "OpenAlex", extracted_refs
+        except Exception:
+            pass
+
+        # 3. Semantic Scholar üzerinden kaynakça çekme (yedek)
+        if clean_doi:
+            try:
+                s2_resp = await client.get(
+                    f"https://api.semanticscholar.org/graph/v1/paper/DOI:{clean_doi}/references",
+                    params={"fields": "title,authors,year,externalIds,venue", "limit": max_refs},
+                    headers=API_HEADERS
+                )
+                if s2_resp.status_code == 200:
+                    for entry in s2_resp.json().get("data") or []:
+                        cited = entry.get("citedPaper") or {}
+                        c_title = (cited.get("title") or "").strip()
+                        c_authors = [a.get("name", "").strip().split()[-1] for a in (cited.get("authors") or []) if a.get("name")]
+                        c_year = cited.get("year")
+                        c_doi = (cited.get("externalIds") or {}).get("DOI")
+                        c_venue = cited.get("venue") or ""
+                        parts = [p for p in [", ".join(c_authors[:3]), f"({c_year})" if c_year else "", c_title, c_venue] if p]
+                        raw_text = ". ".join(parts)
+                        if c_title or c_doi:
+                            extracted_refs.append({
+                                "raw_text": raw_text or c_title or f"DOI: {c_doi}",
+                                "extracted_title": c_title or raw_text,
+                                "authors": c_authors,
+                                "first_author": c_authors[0] if c_authors else None,
+                                "year": int(c_year) if c_year else None,
+                                "doi": c_doi,
+                                "url": None,
+                                "claimed_pages": None
+                            })
+                    if extracted_refs:
+                        return "Semantic Scholar", extracted_refs
+            except Exception:
+                pass
+
+    return "Yok", []
+
+
+@app.get("/analyze-article")
+async def analyze_article_references(
+    doi: str | None = Query(None, description="İncelenecek makalenin DOI numarası"),
+    title: str | None = Query(None, description="İncelenecek makalenin başlığı"),
+    max_refs: int = Query(25, ge=5, le=50, description="Taranacak maksimum kaynak sayısı"),
+    similarity_threshold: int = Query(80, ge=50, le=100, description="Başlık benzerlik eşiği (%)")
+):
+    if not doi and not title:
+        raise HTTPException(
+            status_code=400,
+            detail="Kaynakça taraması için en azından DOI veya makale başlığı gereklidir."
+        )
+
+    start_time = time.time()
+    try:
+        ref_source, refs_list = await _fetch_article_references(doi=doi, title=title, max_refs=max_refs)
+
+        if not refs_list:
+            raise HTTPException(
+                status_code=404,
+                detail="Bu makalenin açık kaynakça (reference) listesine Crossref, OpenAlex ve Semantic Scholar üzerinden erişilemedi."
+            )
+
+        tasks = [
+            verify_reference_with_crossref(
+                ref_info=info,
+                similarity_threshold=similarity_threshold,
+                context_sentences=[]
+            )
+            for info in refs_list
+        ]
+        verification_results = await asyncio.gather(*tasks)
+
+        verified_references = []
+        status_counts: dict[str, int] = {}
+
+        for idx, (info, ver_res) in enumerate(zip(refs_list, verification_results), start=1):
+            st = ver_res.get("status", "UNKNOWN")
+            status_counts[st] = status_counts.get(st, 0) + 1
+
+            verified_references.append({
+                "ref_number": idx,
+                "raw_citation": info["raw_text"],
+                "extracted_authors": info.get("authors", []),
+                "extracted_year": info.get("year"),
+                "extracted_title": info.get("extracted_title"),
+                "doi_in_document": info.get("doi"),
+                "url_in_document": info.get("url"),
+                "claimed_pages": info.get("claimed_pages"),
+                "in_text_mention_count": 0,
+                "verification": ver_res
+            })
+
+        elapsed = round(time.time() - start_time, 2)
+
+        return {
+            "source_mode": "article_reference_scan",
+            "article_info": {
+                "title": title or doi,
+                "doi": doi,
+                "reference_list_source": ref_source
+            },
+            "analysis_summary": {
+                "filename": title or doi,
+                "processing_time_seconds": elapsed,
+                "total_references_found": len(refs_list),
+                "similarity_threshold_used": f"%{similarity_threshold}",
+                "verification_breakdown": status_counts,
+                "academic_databases_queried": [
+                    "Crossref",
+                    "OpenAlex",
+                    "DBLP",
+                    "Europe PMC",
+                    "arXiv",
+                    "DataCite",
+                    "Semantic Scholar"
+                ]
+            },
+            "citation_consistency": {
+                "numbered_citations_in_body": [],
+                "apa_citations_in_body_count": 0,
+                "references_in_bibliography": list(range(1, len(refs_list) + 1)),
+                "missing_numbered_in_bibliography": [],
+                "missing_apa_in_bibliography": [],
+                "unused_in_text": [],
+                "duplicate_entries_in_bibliography": [],
+                "in_text_mention_mismatches": [],
+                "is_perfectly_consistent": True
+            },
+            "bibliographic_verification": verified_references
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Makale kaynakça tarama hatası: {str(e)}")
