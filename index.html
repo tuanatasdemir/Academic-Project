@@ -64,6 +64,47 @@
       </div>
     </section>
 
+<!-- 2. İsimle Makale / Kaynak Arama Kartı -->
+    <section class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-4">
+      <div>
+        <h2 class="text-sm sm:text-base font-bold text-slate-900">İsimle Makale / Kaynak Ara</h2>
+        <p class="text-xs text-slate-500 mt-0.5">
+          Dosya yüklemeden doğrudan makale başlığı (ve isterseniz yazar soyadı) ile akademik veri tabanlarında tarama yapın.
+        </p>
+      </div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-12 gap-2.5">
+        <input
+          id="searchTitleInput"
+          type="text"
+          placeholder="Makale adını yazın (örn: Attention Is All You Need)..."
+          class="sm:col-span-7 px-3.5 py-2.5 text-sm rounded-xl border border-slate-300 focus:outline-none focus:border-blue-500"
+        />
+        <input
+          id="searchAuthorInput"
+          type="text"
+          placeholder="Yazar soyadı (opsiyonel)"
+          class="sm:col-span-3 px-3.5 py-2.5 text-sm rounded-xl border border-slate-300 focus:outline-none focus:border-blue-500"
+        />
+        <button
+          id="btnSearchTitle"
+          type="button"
+          class="sm:col-span-2 bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 text-white font-semibold text-sm px-4 py-2.5 rounded-xl transition"
+        >
+          Ara
+        </button>
+      </div>
+
+      <div id="searchResultsSection" class="hidden pt-3 border-t border-slate-100 space-y-3">
+        <div class="flex items-center justify-between text-xs text-slate-500">
+          <span id="searchSummaryText" class="font-medium text-slate-700"></span>
+          <button id="btnClearSearch" type="button" class="text-slate-400 hover:text-slate-700 font-medium">Temizle</button>
+        </div>
+        <div id="searchResultsContainer" class="space-y-2.5"></div>
+      </div>
+    </section>
+
+
     <!-- Yükleniyor Durumu -->
     <section id="progressSection" class="hidden bg-white rounded-2xl border border-blue-200 p-5 shadow-sm">
       <div class="flex items-center justify-between mb-2">
@@ -143,8 +184,13 @@
   </main>
 
   <script>
+    const API_BASE = (window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost')
+      ? ''
+      : 'https://academic-project-zdy2.onrender.com';
+
     const appState = {
-      backendUrl: 'https://academic-project-zdy2.onrender.com/analyze',
+      backendUrl: `${API_BASE}/analyze`,
+      searchUrl: `${API_BASE}/search`,
       similarityThreshold: 80,
       activeFilter: 'ALL',
       selectedFile: null,
@@ -366,6 +412,92 @@
     }
 
     window.addEventListener('DOMContentLoaded', () => {
+      function escapeHtml(text) {
+      return String(text || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    async function searchArticlesByTitle() {
+      const titleInput = document.getElementById('searchTitleInput');
+      const authorInput = document.getElementById('searchAuthorInput');
+      const btnSearch = document.getElementById('btnSearchTitle');
+      const resultsSection = document.getElementById('searchResultsSection');
+      const resultsContainer = document.getElementById('searchResultsContainer');
+      const summaryText = document.getElementById('searchSummaryText');
+
+      const query = titleInput.value.trim();
+      const author = authorInput.value.trim();
+
+      if (query.length < 6) {
+        showToast('Lütfen en az 6 karakterlik bir makale adı girin.');
+        return;
+      }
+
+      btnSearch.disabled = true;
+      btnSearch.textContent = 'Aranıyor...';
+      resultsSection.classList.remove('hidden');
+      summaryText.textContent = 'Akademik veri tabanları taranıyor...';
+      resultsContainer.innerHTML = '';
+
+      try {
+        const params = new URLSearchParams({ query });
+        if (author) params.append('author', author);
+
+        const response = await fetch(`${appState.searchUrl}?${params.toString()}`);
+        if (!response.ok) {
+          let errDetail = `HTTP ${response.status} hatası`;
+          try {
+            const errJson = await response.json();
+            errDetail = errJson.detail || errDetail;
+          } catch (e) {}
+          throw new Error(errDetail);
+        }
+
+        const data = await response.json();
+        const items = data.results || [];
+        summaryText.textContent = `"${data.query}" için ${items.length} sonuç bulundu (${data.processing_time_seconds} sn)`;
+
+        if (items.length === 0) {
+          resultsContainer.innerHTML = `<div class="p-4 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600">Eşleşen akademik kayıt bulunamadı.</div>`;
+          return;
+        }
+
+        resultsContainer.innerHTML = items.map(item => `
+          <div class="rounded-xl border border-slate-200 p-4 space-y-1.5 bg-slate-50/40">
+            <div class="flex items-start justify-between gap-2 flex-wrap">
+              <h3 class="text-sm font-semibold text-slate-900">${escapeHtml(item.title)}</h3>
+              <div class="flex items-center gap-1.5 shrink-0">
+                <span class="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+                  Benzerlik: %${item.similarity_percent}
+                </span>
+                <span class="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 border border-slate-200">
+                  ${escapeHtml(item.source_database)}
+                </span>
+              </div>
+            </div>
+            <p class="text-xs text-slate-600">
+              <strong>Yazarlar:</strong> ${item.authors.length ? escapeHtml(item.authors.join(', ')) : 'Belirtilmemiş'}
+              ${item.year ? ` • <strong>Yıl:</strong> ${item.year}` : ''}
+              ${item.journal ? ` • <strong>Dergi/Konferans:</strong> ${escapeHtml(item.journal)}` : ''}
+            </p>
+            <div class="flex items-center gap-3 text-xs pt-0.5 flex-wrap">
+              ${item.doi ? `<span class="text-slate-500">DOI: <code class="text-slate-700">${escapeHtml(item.doi)}</code></span>` : ''}
+              ${item.url ? `<a href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline font-medium">Kaynağa Git ↗</a>` : ''}
+            </div>
+          </div>
+        `).join('');
+      } catch (err) {
+        summaryText.textContent = 'Arama sırasında hata oluştu.';
+        showToast(`Arama hatası: ${err.message}`);
+      } finally {
+        btnSearch.disabled = false;
+        btnSearch.textContent = 'Ara';
+      }
+    }
+
       const fileInput = document.getElementById('docxFileInput');
       const dropZone = document.getElementById('dropZone');
       const btnAnalyzeFile = document.getElementById('btnAnalyzeFile');
@@ -438,6 +570,20 @@
         document.getElementById('toastBanner').classList.add('hidden');
       });
     });
+
+    document.getElementById('btnSearchTitle').addEventListener('click', searchArticlesByTitle);
+      document.getElementById('searchTitleInput').addEventListener('keydown', e => {
+        if (e.key === 'Enter') searchArticlesByTitle();
+      });
+      document.getElementById('searchAuthorInput').addEventListener('keydown', e => {
+        if (e.key === 'Enter') searchArticlesByTitle();
+      });
+      document.getElementById('btnClearSearch').addEventListener('click', () => {
+        document.getElementById('searchTitleInput').value = '';
+        document.getElementById('searchAuthorInput').value = '';
+        document.getElementById('searchResultsSection').classList.add('hidden');
+        document.getElementById('searchResultsContainer').innerHTML = '';
+      });
   </script>
 </body>
 </html>

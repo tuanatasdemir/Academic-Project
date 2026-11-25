@@ -16,7 +16,11 @@ try:
         parse_document_sections,
         verify_in_text_mentions,
     )
-    from app.services.crossref_service import verify_reference_with_crossref
+    from app.services.crossref_service import (
+        verify_reference_with_crossref,
+        search_by_title_and_author,
+        compute_title_similarity,
+    )
 except ImportError:
     from citation_regex import (
         extract_all_paragraphs,
@@ -26,7 +30,11 @@ except ImportError:
         parse_document_sections,
         verify_in_text_mentions,
     )
-    from crossref_service import verify_reference_with_crossref
+    from crossref_service import (
+        verify_reference_with_crossref,
+        search_by_title_and_author,
+        compute_title_similarity,
+    )
 
 app = FastAPI(
     title="Akademik Kaynakça Doğrulama ve Metin İçi Atıf Tutarlılığı Sistemi",
@@ -360,3 +368,65 @@ async def analyze_document(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"İşlem hatası: {str(e)}")
+
+
+# ---------------------------------------------------------------------------
+# İSİMLE (BAŞLIK / YAZAR) MAKALE ARAMA ENDPOINTİ
+# ---------------------------------------------------------------------------
+
+@app.get("/search")
+async def search_articles_by_name(
+    query: str = Query(..., min_length=6, description="Aranacak makale adı veya başlığı"),
+    author: str | None = Query(None, description="Opsiyonel yazar soyadı"),
+    year: int | None = Query(None, description="Opsiyonel yayın yılı")
+):
+    start_time = time.time()
+    try:
+        candidates = await search_by_title_and_author(
+            title=query,
+            first_author=author.strip() if author else None,
+            year=year
+        )
+
+        seen_keys: set[str] = set()
+        results = []
+
+        scored_candidates = sorted(
+            candidates,
+            key=lambda c: compute_title_similarity(query, c.get("title", "")),
+            reverse=True
+        )
+
+        for cand in scored_candidates:
+            title = (cand.get("title") or "").strip()
+            if not title:
+                continue
+
+            doi = (cand.get("doi") or "").strip().lower()
+            dedup_key = f"doi:{doi}" if doi else f"title:{title.lower()}"
+            if dedup_key in seen_keys:
+                continue
+            seen_keys.add(dedup_key)
+
+            sim = compute_title_similarity(query, title)
+            results.append({
+                "title": title,
+                "authors": cand.get("authors") or [],
+                "year": cand.get("year"),
+                "journal": cand.get("journal") or "",
+                "doi": cand.get("doi"),
+                "url": cand.get("url") or (f"https://doi.org/{cand['doi']}" if cand.get("doi") else None),
+                "source_database": cand.get("source_api", "Bilinmiyor"),
+                "similarity_percent": sim
+            })
+
+        return {
+            "query": query,
+            "author": author,
+            "year": year,
+            "total_results": len(results),
+            "processing_time_seconds": round(time.time() - start_time, 2),
+            "results": results[:15]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Arama hatası: {str(e)}")
